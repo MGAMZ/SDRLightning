@@ -169,10 +169,12 @@ _flash_details = {}
 _MAX_FLASH_CACHE = 50
 
 # 后台 reader 线程 -> 主 reader_loop 的 IQ chunk 队列
-# 队列上限给到 ~1s 缓冲 (1.5 MSPS * 1024 samples/chunk * 1500 chunk/s ~ 1.5M samples)
-# 容量设大些, 让主循环 100ms spike 时不丢数据; 但太大又会堆内存
-_IQ_QUEUE_MAX = 4096
-_iq_queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=_IQ_QUEUE_MAX)
+# 用 SimpleQueue 而不是 Queue: 纯 C 实现, put/get 不持 GIL,
+# 把背景线程对主循环的 GIL 抢占压到最低 (queue.Queue 的 put 会持
+# GIL 几十微秒, 1500/s 累积起来就是 100ms/s 浪费).
+# SimpleQueue 无界, 主循环慢时队列会涨. 设软上限 + 满了丢最老的
+_IQ_QUEUE_MAX_SOFT = 4096
+_iq_queue: "queue.SimpleQueue[np.ndarray]" = queue.SimpleQueue()
 _reader_thread = None
 
 
@@ -462,17 +464,13 @@ def _iq_reader_thread():
             continue
         if ret.ret <= 0:
             continue
-        seg = buf[:ret.ret].copy()
-        # 队列满: 丢最老的, 保证最新数据流过
-        if _iq_queue.full():
+        # SimpleQueue 是无界的, 但内存也有限. 软上限超过就丢最老的.
+        while _iq_queue.qsize() > _IQ_QUEUE_MAX_SOFT:
             try:
                 _iq_queue.get_nowait()
             except queue.Empty:
-                pass
-        try:
-            _iq_queue.put(seg, timeout=0.5)
-        except queue.Full:
-            pass
+                break
+        _iq_queue.put(buf[:ret.ret].copy())
 
 
 def reader_loop():
@@ -869,6 +867,10 @@ def run_bench(args):
         print(f"[bench] SDR 打开失败: {e}")
         return
 
+    # 启动后台 reader 线程 (跟真实 reader_loop 一样的架构, 让 bench 反映真实行为)
+    rt = threading.Thread(target=_iq_reader_thread, daemon=True)
+    rt.start()
+
 # 重置全局 bench 计数 + 打开 reader_loop 内部计时
     global BENCH, _BENCH_LAST
     BENCH = {
@@ -1059,32 +1061,15 @@ def _bench_loop(no_fft, no_emit, no_flash, no_iq, duration):
         if t_iter > t_end:
             break
 
+        # bench 镜像真实架构: readStream 在后台, 主循环从 _iq_queue 拉
         try:
-            ret = sdr.readStream(stream, [buf], state.chunk, timeoutUs=500000)
-        except Exception as e:
-            print(f"[bench] readStream 异常: {e}")
-            time.sleep(0.5)
+            seg = _iq_queue.get(timeout=0.005)
+        except queue.Empty:
             continue
+        BENCH["samples"] += len(seg)
 
+        # read 已在后台, 主循环不再背 readStream 的卡顿
         t_after_read = time.perf_counter()
-        read_wall = t_after_read - t_iter
-        if read_wall > BENCH["max_read_wall"]:
-            BENCH["max_read_wall"] = read_wall
-            BENCH["max_read_at"] = BENCH["iters"]
-        if read_wall >= 0.050:
-            BENCH["read_vslow"] += 1
-            BENCH["read_total_slow_ms"] += read_wall
-        elif read_wall >= 0.005:
-            BENCH["read_slow"] += 1
-        else:
-            BENCH["read_fast"] += 1
-        if ret.ret <= 0:
-            BENCH["reads_zero"] += 1
-            BENCH["t_readStream"] += read_wall
-            _bench_print_stats(BENCH)
-            continue
-        seg = buf[: ret.ret]
-        BENCH["samples"] += ret.ret
 
         if not no_iq:
             t0 = time.perf_counter()
@@ -1102,7 +1087,7 @@ def _bench_loop(no_fft, no_emit, no_flash, no_iq, duration):
         if not no_flash:
             t_now = time.time()
             win_acc_power += float(np.sum(np.abs(seg) ** 2))
-            win_acc_n += ret.ret
+            win_acc_n += len(seg)
             if win_acc_n >= win_target_n:
                 i_k = win_acc_power / win_acc_n
                 i_k_db = 10 * np.log10(i_k + 1e-18)
@@ -1118,7 +1103,7 @@ def _bench_loop(no_fft, no_emit, no_flash, no_iq, duration):
 
         # FFT / waterfall
         t_fft_start = time.perf_counter()
-        n = ret.ret
+        n = len(seg)
         seg_copy = seg
         while n > 0:
             space = state.fft_size - fft_n
@@ -1175,7 +1160,6 @@ def _bench_loop(no_fft, no_emit, no_flash, no_iq, duration):
         if total_wall > BENCH["max_iter_wall"]:
             BENCH["max_iter_wall"] = total_wall
             BENCH["max_iter_at"] = BENCH["iters"]
-        BENCH["t_readStream"] += read_wall
         BENCH["t_total"] += total_wall
 
         # 每 50 iters 打一行 (调试 throttle 行为)
