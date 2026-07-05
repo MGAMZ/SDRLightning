@@ -159,7 +159,8 @@ let envRate = 100;
 let envMeanDb = -100;
 let flashCount = 0;
 let lastSpec = null;
-let frameCount = 0;
+let rafCount = 0;
+let dataFrameCount = 0;
 let lastFpsT = performance.now();
 
 // === 瀑布滚动模式（离屏存储 + GPU blit，永不自拷贝） ===
@@ -329,12 +330,14 @@ function flushFlashes() {
 
 // === FPS 统计 ===
 function updateFps() {
-    frameCount++;
+    rafCount++;
     const now = performance.now();
     if (now - lastFpsT >= 1000) {
-        const fps = (frameCount * 1000 / (now - lastFpsT)).toFixed(1);
-        $("fps").textContent = `FPS: ${fps}`;
-        frameCount = 0;
+        const rafFps = (rafCount * 1000 / (now - lastFpsT)).toFixed(0);
+        const frameFps = (dataFrameCount * 1000 / (now - lastFpsT)).toFixed(1);
+        $("fps").textContent = `paint ${rafFps}Hz · data ${frameFps}fps`;
+        rafCount = 0;
+        dataFrameCount = 0;
         lastFpsT = now;
     }
 }
@@ -344,6 +347,7 @@ function renderLoop() {
     if (pendingFrame) {
         const f = pendingFrame;
         pendingFrame = null;
+        dataFrameCount++;
         // 瀑布（离屏存储 + 一次 blit）
         pushWaterfallLine(f.spectrum);
         // 频谱
