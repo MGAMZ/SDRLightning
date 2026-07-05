@@ -251,28 +251,42 @@ canvas {
     image-rendering: pixelated;
 }
 
-#sferic-table {
+#flash-table {
     width: 100%;
     border-collapse: collapse;
     font-family: ui-monospace, monospace;
     font-size: 11px;
 }
-#sferic-table th, #sferic-table td {
+#flash-table th, #flash-table td {
     padding: 3px 8px;
     text-align: right;
     border-bottom: 1px solid #1f2330;
 }
-#sferic-table th { color: #888; font-weight: 500; text-align: right; }
-#sferic-table th:first-child, #sferic-table td:first-child { text-align: left; }
-#sferic-table tbody tr.sferic-new { animation: flash 1.5s; }
-@keyframes flash {
+#flash-table th { color: #888; font-weight: 500; text-align: right; }
+#flash-table th:first-child, #flash-table td:first-child { text-align: left; }
+#flash-table tbody tr.flash-new { animation: flashAnim 1.5s; }
+@keyframes flashAnim {
     0% { background: #2c5fa3; }
     100% { background: transparent; }
 }
-.sferic-card { overflow-y: auto; }
-.sferic-card #sferic-table { font-size: 11px; }
-.sferic-card table { max-height: 150px; overflow-y: auto; display: block; }
-/* === Modal: sferic detail === */
+.flash-card { overflow-y: auto; }
+.flash-card #flash-table { font-size: 11px; }
+.flash-card table { max-height: 150px; overflow-y: auto; display: block; }
+/* === Modal: flash detail === */
+.modal-section { margin-top: 10px; }
+.modal-section-title {
+    font-size: 11px;
+    color: #888;
+    margin-bottom: 4px;
+    font-family: ui-monospace, monospace;
+}
+.modal-section canvas {
+    width: 100%;
+    background: #08090c;
+    border-radius: 3px;
+    display: block;
+    image-rendering: pixelated;
+}
 .modal-mask {
     position: fixed;
     inset: 0;
@@ -357,5 +371,5 @@ canvas {
 .card:not(.collapsed) .card-header h3::before { content: "▼ "; color: #555; }
 
 /* 表格行可点击 */
-#sferic-table tbody tr { cursor: pointer; }
-#sferic-table tbody tr:hover { background: #1f2330; }
+#flash-table tbody tr { cursor: pointer; }
+#flash-table tbody tr:hover { background: #1f2330; }

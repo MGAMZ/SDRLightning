@@ -146,10 +146,10 @@ setInterval(() => { resizeAll(); }, 2000);
 
 // === 数据缓冲 ===
 let pendingFrame = null;
-let pendingSferics = [];
+let pendingFlashes = [];
 let envHistory = [];
 let envMeanDb = -100;
-let sfericCount = 0;
+let flashCount = 0;
 let lastSpec = null;
 let frameCount = 0;
 let lastFpsT = performance.now();
@@ -292,23 +292,23 @@ function renderEnvelope() {
     $("env-info").textContent = `mean=${envMeanDb.toFixed(1)} dB`;
 }
 
-// === Sferics ===
-function pushSferic(ev) {
-    const tbody = $("sferic-table").querySelector("tbody");
+// === Flashes ===
+function pushFlash(ev) {
+    const tbody = $("flash-table").querySelector("tbody");
     const tr = document.createElement("tr");
-    tr.classList.add("sferic-new");
+    tr.classList.add("flash-new");
     tr.innerHTML = `<td>${ev.id}</td><td>${ev.t.toFixed(2)}</td>` +
-                   `<td>${ev.peak.toFixed(3)}</td><td>${ev.rms.toFixed(3)}</td>` +
+                   `<td>${ev.peak_env.toFixed(3)}</td><td>${ev.rms_env.toFixed(3)}</td>` +
                    `<td>+${ev.excess_db.toFixed(1)}</td>`;
-    tr.dataset.sfericId = ev.id;
-    tr.addEventListener("click", () => openSfericDetail(ev.id));
+    tr.dataset.flashId = ev.id;
+    tr.addEventListener("click", () => openFlashDetail(ev));
     tbody.insertBefore(tr, tbody.firstChild);
     while (tbody.rows.length > 50) tbody.deleteRow(tbody.rows.length - 1);
 }
 
-function flushSferics() {
-    while (pendingSferics.length > 0) {
-        pushSferic(pendingSferics.shift());
+function flushFlashes() {
+    while (pendingFlashes.length > 0) {
+        pushFlash(pendingFlashes.shift());
     }
 }
 
@@ -339,8 +339,8 @@ function renderLoop() {
         renderEnvelope();
         // 状态
         $("samples-total").textContent = `Samples: ${f.samples.toLocaleString()}`;
-        sfericCount = f.sferic_count;
-        $("sferic-count").textContent = `Sferics: ${sfericCount}`;
+        flashCount = f.flash_count;
+        $("flash-count").textContent = `Flashes: ${flashCount}`;
         if (f.peak_ema !== undefined) {
             const peakPct = (f.peak_ema * 100).toFixed(0);
             const colorClass = f.peak_ema > 0.95 ? "peak-warn" : (f.peak_ema > 0.7 ? "peak-ok" : "peak-low");
@@ -354,140 +354,251 @@ function renderLoop() {
             $("status-dot").className = "dot err";
         }
     }
-    flushSferics();
+    flushFlashes();
     updateFps();
     requestAnimationFrame(renderLoop);
 }
 requestAnimationFrame(renderLoop);
 
-// === Sferic 详情 modal ===
-const sfModal = $("sferic-modal");
-const sfWave = $("sf-wave");
-const sfCtx2 = sfWave.getContext("2d");
+// === Flash 详情 modal ===
+const flModal = $("flash-modal");
+const flEnvCanvas = $("fl-env");
+const flSpecCanvas = $("fl-spec");
+const flIqCanvas = $("fl-iq");
+const flEnvCtx = flEnvCanvas.getContext("2d");
+const flSpecCtx = flSpecCanvas.getContext("2d");
+const flIqCtx = flIqCanvas.getContext("2d");
 
-function openSfericDetail(id) {
-    fetch(`/api/sferic/${id}/waveform`)
-        .then(r => r.json())
-        .then(d => {
-            if (d.error) { alert("波形未缓存（事件太老或后端已重启）"); return; }
-            $("sf-id").textContent = d.id;
-            $("sf-t").textContent = d.t !== undefined ? d.t.toFixed(2) : "?";
-            const dt_ms = 1000 / d.sample_rate;
-            const duration_ms = d.n * dt_ms;
-
-            $("sf-meta").textContent =
-                `n=${d.n} samples, sample_rate=${d.sample_rate.toLocaleString()} SPS, ` +
-                `duration=${duration_ms.toFixed(2)} ms`;
-
-            // 先让 modal 可见，再测量 canvas 尺寸
-            sfModal.classList.add("open");
-
-            // 等浏览器完成 layout
-            requestAnimationFrame(() => {
-                drawSfericWaveform(d, dt_ms);
-            });
-        })
-        .catch(e => alert("获取波形失败: " + e));
+function fitCanvas2(c) {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = c.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return { W: 0, H: 0 };
+    const newW = Math.floor(rect.width * dpr);
+    const newH = Math.floor(rect.height * dpr);
+    if (c.width !== newW || c.height !== newH) {
+        c.width = newW;
+        c.height = newH;
+    }
+    c.getContext("2d").setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { W: rect.width, H: rect.height };
 }
 
-function drawSfericWaveform(d, dt_ms) {
-    const cssW = sfWave.clientWidth || 580;
-    const cssH = sfWave.clientHeight || 220;
-    const dpr = window.devicePixelRatio || 1;
-    sfWave.width = Math.floor(cssW * dpr);
-    sfWave.height = Math.floor(cssH * dpr);
-    sfCtx2.setTransform(dpr, 0, 0, dpr, 0, 0);
+function openFlashDetail(ev) {
+    $("fl-id").textContent = ev.id;
+    $("fl-t").textContent = ev.t.toFixed(2);
+    const env_rate = ev.envelope_rate_hz || 1000;
+    const env_n = (ev.envelope_trace || []).length;
+    const env_dur_s = env_n / env_rate;
+    $("fl-meta").textContent =
+        `peak_env=${ev.peak_env.toFixed(3)}, rms_env=${ev.rms_env.toFixed(3)}, ` +
+        `excess=${ev.excess_db >= 0 ? "+" : ""}${ev.excess_db.toFixed(1)} dB · ` +
+        `duration=${env_dur_s.toFixed(2)} s · ` +
+        `fc=${(ev.freq_center_hz/1e6).toFixed(3)} MHz · ` +
+        `sr=${(ev.sample_rate_hz/1e6).toFixed(2)} MSPS`;
 
-    const W = cssW;
-    const H = cssH;
+    flModal.classList.add("open");
+
+    requestAnimationFrame(() => {
+        drawFlashEnvelope(ev, env_rate);
+        drawFlashSpectrum(ev);
+        // IQ peak slice 是大头, 异步拉
+        fetch(`/api/flash/${ev.id}/detail`)
+            .then(r => r.json())
+            .then(d => {
+                if (d.error) {
+                    drawFlashIqUnavailable();
+                    return;
+                }
+                drawFlashIqSlice(d);
+            })
+            .catch(() => drawFlashIqUnavailable());
+    });
+}
+
+function drawFlashEnvelope(ev, env_rate) {
+    const { W, H } = fitCanvas2(flEnvCanvas);
+    if (W === 0) return;
+    flEnvCtx.fillStyle = "#08090c";
+    flEnvCtx.fillRect(0, 0, W, H);
+
+    const trace = ev.envelope_trace || [];
+    if (trace.length < 2) return;
+    let vMin = trace[0], vMax = trace[0];
+    for (let i = 1; i < trace.length; i++) {
+        if (trace[i] < vMin) vMin = trace[i];
+        if (trace[i] > vMax) vMax = trace[i];
+    }
+    const pad = (vMax - vMin) * 0.1 || 0.001;
+    vMin = Math.max(0, vMin - pad);
+    vMax = vMax + pad;
+
+    const xScale = W / (trace.length - 1);
+    const yScale = H / (vMax - vMin);
+
+    flEnvCtx.strokeStyle = "#ffcc00";
+    flEnvCtx.lineWidth = 1.2;
+    flEnvCtx.beginPath();
+    for (let i = 0; i < trace.length; i++) {
+        const x = i * xScale;
+        const y = H - (trace[i] - vMin) * yScale;
+        if (i === 0) flEnvCtx.moveTo(x, y); else flEnvCtx.lineTo(x, y);
+    }
+    flEnvCtx.stroke();
+
+    // 峰值虚线
+    const peakIdx = ev.peak_idx;
+    flEnvCtx.strokeStyle = "#ff8844";
+    flEnvCtx.setLineDash([4, 4]);
+    flEnvCtx.beginPath();
+    flEnvCtx.moveTo(peakIdx * xScale, 0);
+    flEnvCtx.lineTo(peakIdx * xScale, H);
+    flEnvCtx.stroke();
+    flEnvCtx.setLineDash([]);
+
+    // 触发时刻 (T_pre 边界)
+    const preMs = ev.pre_ms;
+    const triggerIdx = (preMs / 1000) * env_rate;
+    flEnvCtx.strokeStyle = "#5577ff";
+    flEnvCtx.lineWidth = 1;
+    flEnvCtx.setLineDash([2, 4]);
+    flEnvCtx.beginPath();
+    flEnvCtx.moveTo(triggerIdx * xScale, 0);
+    flEnvCtx.lineTo(triggerIdx * xScale, H);
+    flEnvCtx.stroke();
+    flEnvCtx.setLineDash([]);
+
+    flEnvCtx.fillStyle = "#888";
+    flEnvCtx.font = "10px monospace";
+    flEnvCtx.fillText("← pre-trigger  |trigger|  post-trigger →", 4, 12);
+    flEnvCtx.fillText(`peak=${ev.peak_env.toFixed(3)} @ ${ev.peak_t_ms.toFixed(1)} ms`, 4, H - 4);
+    flEnvCtx.fillText(`+${(env_dur_s*1000).toFixed(0)} ms`, W - 50, H - 4);
+    const env_dur_s_val = trace.length / env_rate;
+    void env_dur_s_val;
+}
+
+function drawFlashSpectrum(ev) {
+    const { W, H } = fitCanvas2(flSpecCanvas);
+    if (W === 0) return;
+    flSpecCtx.fillStyle = "#08090c";
+    flSpecCtx.fillRect(0, 0, W, H);
+
+    const spec = ev.spectrum || [];
+    if (spec.length < 2) return;
+    let vMin = spec[0], vMax = spec[0];
+    for (let i = 1; i < spec.length; i++) {
+        if (spec[i] < vMin) vMin = spec[i];
+        if (spec[i] > vMax) vMax = spec[i];
+    }
+    const xScale = W / (spec.length - 1);
+    const yScale = H / (vMax - vMin || 1);
+
+    flSpecCtx.strokeStyle = "#00dd77";
+    flSpecCtx.lineWidth = 1.2;
+    flSpecCtx.beginPath();
+    for (let i = 0; i < spec.length; i++) {
+        const x = i * xScale;
+        const y = H - (spec[i] - vMin) * yScale;
+        if (i === 0) flSpecCtx.moveTo(x, y); else flSpecCtx.lineTo(x, y);
+    }
+    flSpecCtx.stroke();
+
+    flSpecCtx.fillStyle = "#888";
+    flSpecCtx.font = "10px monospace";
+    flSpecCtx.fillText(`peak ${vMax.toFixed(1)} dB`, 4, 12);
+}
+
+function drawFlashIqSlice(d) {
+    const { W, H } = fitCanvas2(flIqCanvas);
+    if (W === 0) return;
+    flIqCtx.fillStyle = "#08090c";
+    flIqCtx.fillRect(0, 0, W, H);
+
+    const n = d.n || 0;
+    if (n < 2) return;
     const half = H / 2;
-
-    sfCtx2.fillStyle = "#08090c";
-    sfCtx2.fillRect(0, 0, W, H);
-
-    // 中线
-    sfCtx2.strokeStyle = "#1f2330";
-    sfCtx2.lineWidth = 1;
-    sfCtx2.beginPath(); sfCtx2.moveTo(0, half); sfCtx2.lineTo(W, half); sfCtx2.stroke();
-
-    // 找峰值位置
-    let peakIdx = 0;
     let peakVal = 0;
-    const mags = new Float32Array(d.n);
-    for (let i = 0; i < d.n; i++) {
+    const mags = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
         const m = Math.sqrt(d.i[i]*d.i[i] + d.q[i]*d.q[i]);
         mags[i] = m;
-        if (m > peakVal) { peakVal = m; peakIdx = i; }
+        if (m > peakVal) peakVal = m;
     }
     const maxAbs = Math.max(peakVal, 1e-9);
-    const xScale = W / (d.n - 1);
+    const xScale = W / (n - 1);
     const yScale = (half * 0.85) / maxAbs;
 
-    // 峰值垂直虚线
-    sfCtx2.strokeStyle = "#ffcc00";
-    sfCtx2.lineWidth = 1;
-    sfCtx2.setLineDash([4, 4]);
-    sfCtx2.beginPath();
-    sfCtx2.moveTo(peakIdx * xScale, 0);
-    sfCtx2.lineTo(peakIdx * xScale, H);
-    sfCtx2.stroke();
-    sfCtx2.setLineDash([]);
+    // 中线
+    flIqCtx.strokeStyle = "#1f2330";
+    flIqCtx.lineWidth = 1;
+    flIqCtx.beginPath(); flIqCtx.moveTo(0, half); flIqCtx.lineTo(W, half); flIqCtx.stroke();
+
+    // 峰值位置
+    const peakIdx = d.peak_idx || 0;
+    flIqCtx.strokeStyle = "#ffcc00";
+    flIqCtx.setLineDash([4, 4]);
+    flIqCtx.beginPath();
+    flIqCtx.moveTo(peakIdx * xScale, 0);
+    flIqCtx.lineTo(peakIdx * xScale, H);
+    flIqCtx.stroke();
+    flIqCtx.setLineDash([]);
 
     // I (上半绿)
-    sfCtx2.strokeStyle = "#00dd77";
-    sfCtx2.lineWidth = 1;
-    sfCtx2.beginPath();
-    for (let i = 0; i < d.n; i++) {
+    flIqCtx.strokeStyle = "#00dd77";
+    flIqCtx.lineWidth = 1;
+    flIqCtx.beginPath();
+    for (let i = 0; i < n; i++) {
         const x = i * xScale;
         const y = half / 2 - d.i[i] * yScale;
-        if (i === 0) sfCtx2.moveTo(x, y); else sfCtx2.lineTo(x, y);
+        if (i === 0) flIqCtx.moveTo(x, y); else flIqCtx.lineTo(x, y);
     }
-    sfCtx2.stroke();
+    flIqCtx.stroke();
 
     // Q (上半红)
-    sfCtx2.strokeStyle = "#dd3355";
-    sfCtx2.beginPath();
-    for (let i = 0; i < d.n; i++) {
+    flIqCtx.strokeStyle = "#dd3355";
+    flIqCtx.beginPath();
+    for (let i = 0; i < n; i++) {
         const x = i * xScale;
         const y = half / 2 - d.q[i] * yScale;
-        if (i === 0) sfCtx2.moveTo(x, y); else sfCtx2.lineTo(x, y);
+        if (i === 0) flIqCtx.moveTo(x, y); else flIqCtx.lineTo(x, y);
     }
-    sfCtx2.stroke();
+    flIqCtx.stroke();
 
-    // Magnitude (下半黄)
-    sfCtx2.strokeStyle = "#ffcc00";
-    sfCtx2.lineWidth = 1.4;
-    sfCtx2.beginPath();
-    for (let i = 0; i < d.n; i++) {
+    // |IQ| (下半黄)
+    flIqCtx.strokeStyle = "#ffcc00";
+    flIqCtx.lineWidth = 1.4;
+    flIqCtx.beginPath();
+    for (let i = 0; i < n; i++) {
         const x = i * xScale;
-        const y = H - mags[i] * yScale * 0.9 - 8;
-        if (i === 0) sfCtx2.moveTo(x, y); else sfCtx2.lineTo(x, y);
+        const y = H - mags[i] * yScale * 0.9 - 6;
+        if (i === 0) flIqCtx.moveTo(x, y); else flIqCtx.lineTo(x, y);
     }
-    sfCtx2.stroke();
+    flIqCtx.stroke();
 
-    // 峰值标记文字
-    sfCtx2.fillStyle = "#ffcc00";
-    sfCtx2.font = "10px monospace";
-    sfCtx2.fillText(`peak=${peakVal.toFixed(3)} @ ${(peakIdx * dt_ms).toFixed(2)} ms`,
-                    Math.min(peakIdx * xScale + 6, W - 200), 14);
-
-    // 标签
-    sfCtx2.fillStyle = "#888";
-    sfCtx2.font = "10px monospace";
-    sfCtx2.fillText("I (绿) / Q (红) 时域", 5, 12);
-    sfCtx2.fillText("|IQ| (黄) 包络", 5, half + 12);
-    // 时间轴
-    sfCtx2.fillText(`0 ms`, 4, H - 4);
-    sfCtx2.fillText(`${(d.n * dt_ms).toFixed(2)} ms`, W - 38, H - 4);
+    const dt_ms = 1000 / d.sample_rate;
+    flIqCtx.fillStyle = "#888";
+    flIqCtx.font = "10px monospace";
+    flIqCtx.fillText("I (绿) / Q (红) 时域,  |IQ| (黄)", 4, 12);
+    flIqCtx.fillText(`0 ms`, 4, H - 4);
+    flIqCtx.fillText(`${(n * dt_ms).toFixed(1)} ms`, W - 50, H - 4);
 }
 
-function closeSfericDetail() {
-    sfModal.classList.remove("open");
+function drawFlashIqUnavailable() {
+    const { W, H } = fitCanvas2(flIqCanvas);
+    if (W === 0) return;
+    flIqCtx.fillStyle = "#08090c";
+    flIqCtx.fillRect(0, 0, W, H);
+    flIqCtx.fillStyle = "#888";
+    flIqCtx.font = "11px monospace";
+    flIqCtx.fillText("IQ 切片未缓存 (事件太老或后端已重启)", 10, H / 2);
 }
 
-$("sf-close").addEventListener("click", closeSfericDetail);
-sfModal.addEventListener("click", (e) => {
-    if (e.target === sfModal) closeSfericDetail();
+function closeFlashDetail() {
+    flModal.classList.remove("open");
+}
+
+$("fl-close").addEventListener("click", closeFlashDetail);
+flModal.addEventListener("click", (e) => {
+    if (e.target === flModal) closeFlashDetail();
 });
 
 // === 卡片折叠/展开 ===
@@ -495,9 +606,9 @@ const CARD_ROW_SIZE = {
     waterfall: 'minmax(80px, 1fr)',
     spectrum:  'minmax(80px, 1fr)',
     env:       '130px',
-    sferic:    'minmax(100px, 220px)',
+    flash:    'minmax(100px, 220px)',
 };
-const CARD_ORDER = ['waterfall', 'spectrum', 'env', 'sferic'];
+const CARD_ORDER = ['waterfall', 'spectrum', 'env', 'flash'];
 
 function updateDisplayLayout() {
     const rows = CARD_ORDER.map(name => {
@@ -610,8 +721,12 @@ socket.on("state", (s) => {
     $("val-ifgr").textContent = s.ifgr;
     $("ctl-rfgr").value = s.rfgr;
     $("val-rfgr").textContent = s.rfgr;
-    $("ctl-thresh").value = s.sferic_thresh_db;
-    $("ctl-cooldown").value = s.sferic_cooldown;
+    $("ctl-window-ms").value = s.flash_window_ms;
+    $("ctl-baseline-s").value = s.flash_baseline_s;
+    $("ctl-thresh").value = s.flash_thresh_db;
+    $("ctl-pre-ms").value = s.flash_pre_ms;
+    $("ctl-post-ms").value = s.flash_post_ms;
+    $("ctl-cooldown").value = s.flash_cooldown_s;
     $("sample-rate").textContent = `SR: ${(s.sample_rate/1e6).toFixed(2)} MSPS`;
 });
 
@@ -619,8 +734,8 @@ socket.on("frame", (f) => {
     pendingFrame = f;
 });
 
-socket.on("sferic", (ev) => {
-    pendingSferics.push(ev);
+socket.on("flash", (ev) => {
+    pendingFlashes.push(ev);
 });
 
 // === UI 控制 ===
@@ -637,8 +752,12 @@ function applyControls() {
         sample_rate: parseFloat($("ctl-sr").value),
         ifgr: parseInt($("ctl-ifgr").value),
         rfgr: parseInt($("ctl-rfgr").value),
-        sferic_thresh_db: parseFloat($("ctl-thresh").value),
-        sferic_cooldown: parseFloat($("ctl-cooldown").value),
+        flash_window_ms: parseFloat($("ctl-window-ms").value),
+        flash_baseline_s: parseFloat($("ctl-baseline-s").value),
+        flash_thresh_db: parseFloat($("ctl-thresh").value),
+        flash_pre_ms: parseFloat($("ctl-pre-ms").value),
+        flash_post_ms: parseFloat($("ctl-post-ms").value),
+        flash_cooldown_s: parseFloat($("ctl-cooldown").value),
     };
     msg.textContent = "应用…";
     msg.className = "hint";
@@ -713,7 +832,11 @@ fetch("/api/state").then(r => r.json()).then(s => {
     $("val-ifgr").textContent = s.ifgr;
     $("ctl-rfgr").value = s.rfgr;
     $("val-rfgr").textContent = s.rfgr;
-    $("ctl-thresh").value = s.sferic_thresh_db;
-    $("ctl-cooldown").value = s.sferic_cooldown;
+    $("ctl-window-ms").value = s.flash_window_ms;
+    $("ctl-baseline-s").value = s.flash_baseline_s;
+    $("ctl-thresh").value = s.flash_thresh_db;
+    $("ctl-pre-ms").value = s.flash_pre_ms;
+    $("ctl-post-ms").value = s.flash_post_ms;
+    $("ctl-cooldown").value = s.flash_cooldown_s;
     $("sample-rate").textContent = `SR: ${(s.sample_rate/1e6).toFixed(2)} MSPS`;
 });

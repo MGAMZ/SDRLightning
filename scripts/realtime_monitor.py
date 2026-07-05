@@ -4,7 +4,7 @@ realtime_monitor.py
 
 实时从 RSP1 读 IQ，**持续输出到 stdout**：
   - 每 N 秒打印一行 [SPEC] 最新频谱统计 + ASCII bar
-  - 检测到 sferics 脉冲时打印 [SFERIC] 一行
+  - 检测到 flash 时打印 [FLASH] 一行 (T_w 窗积分功率超 baseline Δ dB)
 
 不依赖 GUI / TTY。可以：
     python scripts/realtime_monitor.py | Tee-Object -FilePath sdr.log
@@ -87,10 +87,14 @@ def main():
     parser.add_argument("--chunk", type=int, default=1024)
     parser.add_argument("--print-period", type=float, default=1.0,
                         help="每隔多少秒打印一帧 [SPEC]")
-    parser.add_argument("--sferic-thresh-db", type=float, default=12.0,
-                        help="包络超过滑动均值多少 dB 算 sferic")
-    parser.add_argument("--sferic-cooldown", type=float, default=0.3,
-                        help="两次 sferic 之间最短间隔 (s)")
+    parser.add_argument("--flash-window-ms", type=float, default=200.0,
+                        help="窗长 T_w: 一次强度积分的时间 (ms)")
+    parser.add_argument("--flash-baseline-s", type=float, default=3.0,
+                        help="baseline 回看时长 T_b (s)")
+    parser.add_argument("--flash-thresh-db", type=float, default=12.0,
+                        help="窗功率超 baseline 多少 dB 触发")
+    parser.add_argument("--flash-cooldown-s", type=float, default=1.0,
+                        help="两次 flash 之间冷却 (s)")
     parser.add_argument("--duration", type=float, default=0,
                         help="运行时长 (0=无限)")
     parser.add_argument("--plot", action="store_true",
@@ -116,9 +120,13 @@ def main():
     buf = np.empty(args.chunk, dtype=np.complex64)
     fft_buf = np.zeros(args.fft_size, dtype=np.complex64)
     fft_n = 0
-    env_window = deque(maxlen=400)  # 包络滑动窗口（约 1s）
-    sferic_count = 0
-    last_sferic_t = 0.0
+    env_window = deque(maxlen=400)
+    intensity_ring = deque(maxlen=max(2, int(args.flash_baseline_s * 1000 / args.flash_window_ms) + 4))
+    win_target_n = max(1, int(args.sample_rate * args.flash_window_ms / 1000))
+    win_acc_power = 0.0
+    win_acc_n = 0
+    flash_count = 0
+    last_trigger_t = -1e9
 
     t_start = time.time()
     n_total = 0
@@ -134,25 +142,33 @@ def main():
             seg = buf[: sr.ret]
             n_total += sr.ret
 
-            # 包络
+            # 包络 (供 UI 显示 / baseline 监视)
             env_window.append(float(np.mean(np.abs(seg))))
-            env_now = env_window[-1]
-            env_mean = float(np.mean(env_window))
-            env_db_now = 20 * np.log10(env_now + 1e-12)
-            env_db_mean = 20 * np.log10(env_mean + 1e-12)
-            excess_db = env_db_now - env_db_mean
+            env_db_now = 20 * np.log10(env_window[-1] + 1e-12)
+            env_db_mean = 20 * np.log10(np.mean(env_window) + 1e-12)
 
-            # sferics 检测
+            # === flash 检测: 窗积分功率 vs baseline ===
             t_now = time.time()
-            if (excess_db > args.sferic_thresh_db and
-                    (t_now - last_sferic_t) > args.sferic_cooldown):
-                last_sferic_t = t_now
-                sferic_count += 1
-                peak = float(np.max(np.abs(seg)))
-                rms = float(np.sqrt(np.mean(seg.real**2 + seg.imag**2)))
-                print(f"[SFERIC #{sferic_count:04d}] t={t_now-t_start:7.2f}s  "
-                      f"peak={peak:.3f}  rms={rms:.3f}  excess=+{excess_db:.1f} dB",
-                      flush=True)
+            win_acc_power += float(np.sum(np.abs(seg) ** 2))
+            win_acc_n += sr.ret
+            if win_acc_n >= win_target_n:
+                i_k = win_acc_power / win_acc_n
+                i_k_db = 10 * np.log10(i_k + 1e-18)
+                intensity_ring.append(i_k_db)
+                baseline_db = float(np.mean(intensity_ring)) if intensity_ring else -100.0
+                excess_db = i_k_db - baseline_db
+
+                in_cd = (t_now - last_trigger_t) < args.flash_cooldown_s
+                if (not in_cd) and excess_db > args.flash_thresh_db:
+                    last_trigger_t = t_now
+                    flash_count += 1
+                    seg_peak = float(np.max(np.abs(seg)))
+                    print(f"[FLASH #{flash_count:04d}] t={t_now-t_start:7.2f}s  "
+                          f"window_peak={seg_peak:.3f}  excess=+{excess_db:.1f} dB "
+                          f"(baseline={baseline_db:.1f} dB, T_w={args.flash_window_ms:.0f}ms)",
+                          flush=True)
+                win_acc_power = 0.0
+                win_acc_n = 0
 
             # 累积 FFT（chunk <= fft_size 时一帧填不满，不算；下一个 chunk 续写）
             n = len(seg)
@@ -180,7 +196,7 @@ def main():
                 bar_width = 30
                 print(f"[SPEC] t={t_now-t_start:6.1f}s  samples={n_total:,}  "
                       f"env_mean={env_db_mean:+5.1f} dB  env_now={env_db_now:+5.1f} dB  "
-                      f"sferics={sferic_count}")
+                      f"flashes={flash_count}")
                 print(f"       fc={args.center_freq/1e3:7.2f} kHz, "
                       f"span=±{args.sample_rate/2/1e3:.0f} kHz")
                 for i, v in enumerate(ds):
@@ -200,7 +216,7 @@ def main():
 
     print(f"\n[+] 结束. 总采样 {n_total:,} samples, "
           f"运行时长 {time.time()-t_start:.1f}s, "
-          f"sferics 检测到 {sferic_count} 次")
+          f"flashes 检测到 {flash_count} 次")
 
 
 if __name__ == "__main__":

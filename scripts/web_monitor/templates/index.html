@@ -20,7 +20,7 @@
     <span class="sep">|</span>
     <span id="samples-total">Samples: --</span>
     <span class="sep">|</span>
-    <span id="sferic-count">Sferics: 0</span>
+    <span id="flash-count">Flashes: 0</span>
     <span class="sep">|</span>
     <span id="peak-info">Peak: --</span>
     <span class="sep">|</span>
@@ -39,7 +39,7 @@
     <h2>控制</h2>
     <div class="control-group">
       <label>中心频率
-        <span class="tip" data-tip="RSP1 调谐到的中心频率。VLF sferics 主能量在 3-30 kHz，常用 24 kHz；长波导航/广播在 70-200 kHz；FM 广播在 88-108 MHz。RSP1 范围 10 kHz – 2 GHz。
+        <span class="tip" data-tip="RSP1 调谐到的中心频率。VLF 闪电放电主能量在 3-30 kHz，常用 24 kHz；长波导航/广播在 70-200 kHz；FM 广播在 88-108 MHz。RSP1 范围 10 kHz – 2 GHz。
 
 输入框只能输数字；右侧 4 个按钮切换显示单位 (Hz / kHz / MHz / GHz)。切换单位时数值会按比例换算，物理频率不变。">?</span>
       </label>
@@ -72,7 +72,7 @@
         <span class="tip" data-tip="IF Gain Reduction — IF 级的衰减量 (20-59 dB)。
 ⚠ 值越大 = 衰减越多 = 总增益越小 = 信号越弱 (Peak 下降)。
    值越小 = 衰减越少 = 总增益越大 = 信号越强 (Peak 上升)，但 ADC 饱和风险高。
-VLF sferics 一般调到 25-40 之间（背景噪声大，要足够增益）。">?</span>
+VLF 闪电探测一般调到 25-40 之间（背景噪声大，要足够增益）。">?</span>
       </label>
       <input type="range" id="ctl-ifgr" min="20" max="59" step="1" value="39">
     </div>
@@ -86,19 +86,43 @@ VLF 段一般用 0 或 1。FM/广播段建议 2 或 3 防过载。">?</span>
       <input type="range" id="ctl-rfgr" min="0" max="3" step="1" value="1">
     </div>
     <div class="control-group">
-      <label>Sferic 阈值 (dB)
-        <span class="tip" data-tip="包络超过滑动均值多少 dB 算一次 sferic。VLF 段背景噪声下一般 10-15 dB，干净条件下可降到 6-8 dB。">?</span>
+      <label>窗长 T<sub>w</sub> (ms)
+        <span class="tip" data-tip="一次强度积分的窗口长度。每 T_w 算一次窗内平均功率 I_k，拿它跟 baseline 比。典型闪电一次放电 200-500 ms，所以窗长 100-300 ms 比较合适。">?</span>
+      </label>
+      <input type="number" id="ctl-window-ms" value="200" step="50" min="50" max="500">
+    </div>
+    <div class="control-group">
+      <label>Baseline 时长 T<sub>b</sub> (s)
+        <span class="tip" data-tip="回看多少秒的窗强度来算 baseline。1 s 灵敏但易误触；5 s 稳但漏连续雷暴。3 s 是常用折中。">?</span>
+      </label>
+      <input type="number" id="ctl-baseline-s" value="3" step="0.5" min="1" max="10">
+    </div>
+    <div class="control-group">
+      <label>触发阈值 Δ (dB)
+        <span class="tip" data-tip="当前窗功率比 baseline 高出多少 dB 算一次 flash。VLF 干净窗口下 6-10 dB，噪声大时 12-18 dB。">?</span>
       </label>
       <input type="number" id="ctl-thresh" value="12" step="0.5" min="3" max="30">
     </div>
     <div class="control-group">
-      <label>Sferic 冷却 (s)
-        <span class="tip" data-tip="两次触发之间的最短间隔。真实闪电回击典型间隔 50-200 ms，所以冷却 0.2-0.3 比较合适。">?</span>
+      <label>预触发 T<sub>pre</sub> (ms)
+        <span class="tip" data-tip="触发前保存的包络/IQ 长度，存的是 flash 启动前的环境。范围 100-2000 ms。">?</span>
       </label>
-      <input type="number" id="ctl-cooldown" value="0.3" step="0.05" min="0.05">
+      <input type="number" id="ctl-pre-ms" value="500" step="100" min="100" max="2000">
+    </div>
+    <div class="control-group">
+      <label>后触发 T<sub>post</sub> (ms)
+        <span class="tip" data-tip="触发后继续保存的包络/IQ 长度，存的是 flash 衰减段。范围 100-2000 ms。">?</span>
+      </label>
+      <input type="number" id="ctl-post-ms" value="700" step="100" min="100" max="2000">
+    </div>
+    <div class="control-group">
+      <label>冷却 T<sub>cd</sub> (s)
+        <span class="tip" data-tip="一次触发后多久内不再触发，抑制同一 flash 被重复计为多次。">?</span>
+      </label>
+      <input type="number" id="ctl-cooldown" value="1.0" step="0.1" min="0.2" max="5">
     </div>
     <div class="control-group" style="margin-top:10px">
-      <small style="color:#888">包络 = |IQ| = √(I² + Q²)，即信号瞬时幅度。sferic 在它上面是突然的尖峰。</small>
+      <small style="color:#888">I_k = 窗内 \|IQ\|² 均值（窄带功率），baseline = 过去 T_b 内 I_k 的均值，触发 = I_k − baseline &gt; Δ。</small>
     </div>
     <button id="apply-btn">应用</button>
     <button id="export-btn" class="secondary">导出瀑布图 PNG</button>
@@ -108,7 +132,7 @@ VLF 段一般用 0 或 1。FM/广播段建议 2 或 3 防过载。">?</span>
     <details open>
       <summary style="cursor:pointer;color:#888;font-size:11px;margin:4px 0">VLF (3–30 kHz)</summary>
       <button class="preset" data-freq="19800">19.8 kHz · NSS (美海军)</button>
-      <button class="preset" data-freq="24000">24.0 kHz · VLF sferics</button>
+      <button class="preset" data-freq="24000">24.0 kHz · VLF 闪电</button>
       <button class="preset" data-freq="27000">27.0 kHz · Omega (已停)</button>
     </details>
     <details>
@@ -190,16 +214,16 @@ VLF 段一般用 0 或 1。FM/广播段建议 2 或 3 防过载。">?</span>
       <canvas id="env"></canvas>
     </div>
 
-    <div class="card sferic-card" id="card-sferic">
+    <div class="card flash-card" id="card-flash">
       <div class="card-header">
-        <h3>Sferics 事件 <small style="color:#888">（点击行查看波形）</small></h3>
-        <span id="sferic-info" class="muted"></span>
+        <h3>Flash 事件 <small style="color:#888">（点击行查看细节）</small></h3>
+        <span id="flash-info" class="muted"></span>
         <span class="card-tools">
-          <button class="card-btn" data-card="sferic" data-action="expand">⤢</button>
-          <button class="card-btn" data-card="sferic" data-action="collapse">_</button>
+          <button class="card-btn" data-card="flash" data-action="expand">⤢</button>
+          <button class="card-btn" data-card="flash" data-action="collapse">_</button>
         </span>
       </div>
-      <table id="sferic-table">
+      <table id="flash-table">
         <thead><tr>
           <th>#</th><th>t (s)</th><th>peak</th><th>rms</th><th>excess (dB)</th>
         </tr></thead>
@@ -209,44 +233,59 @@ VLF 段一般用 0 或 1。FM/广播段建议 2 或 3 防过载。">?</span>
   </section>
 </div>
 
-<!-- Sferic 详情 modal -->
-<div class="modal-mask" id="sferic-modal">
+<!-- Flash 详情 modal -->
+<div class="modal-mask" id="flash-modal">
   <div class="modal">
-    <h2>Sferic #<span id="sf-id"></span> · t=<span id="sf-t"></span>s</h2>
-    <div class="meta" id="sf-meta"></div>
-    <canvas id="sf-wave" width="580" height="220"></canvas>
-    <div class="legend">
-      <span><b style="color:#00dd77">I</b> 同相分量 (In-phase)</span>
-      <span><b style="color:#dd3355">Q</b> 正交分量 (Quadrature)</span>
-      <span><b style="color:#ffcc00">|IQ|</b> 包络/瞬时幅度</span>
-      <span id="sf-peak-marker">↑ 峰值位置</span>
+    <h2>Flash #<span id="fl-id"></span> · t=<span id="fl-t"></span>s</h2>
+    <div class="meta" id="fl-meta"></div>
+
+    <div class="modal-section">
+      <div class="modal-section-title">包络轨迹 (T<sub>pre</sub> + T<sub>post</sub>，覆盖整个 flash)</div>
+      <canvas id="fl-env" width="700" height="140"></canvas>
     </div>
+
+    <div class="modal-section">
+      <div class="modal-section-title">窗口平均频谱 (整段捕获区间 FFT 平方均值)</div>
+      <canvas id="fl-spec" width="700" height="140"></canvas>
+    </div>
+
+    <div class="modal-section">
+      <div class="modal-section-title">峰值附近 IQ 切片 (±25 ms)</div>
+      <canvas id="fl-iq" width="700" height="180"></canvas>
+    </div>
+
+    <div class="legend">
+      <span><b style="color:#ffcc00">envelope</b> 窄带 \|IQ\|</span>
+      <span><b style="color:#00dd77">I</b> 同相</span>
+      <span><b style="color:#dd3355">Q</b> 正交</span>
+      <span><b style="color:#ffcc00">|IQ|</b> 包络</span>
+    </div>
+
     <details class="how-to-read">
       <summary>📖 如何读这张图（点开/折叠）</summary>
       <div class="how-to-content">
-        <p><b>坐标轴</b>：横轴是时间，从捕获窗口起点 (0 ms) 到终点（右端 ≈ duration ms）。纵轴上半部分是信号瞬时电压（已归一化到 ±满量程），下半部分是包络强度。</p>
-        <p><b>I / Q（同相 / 正交分量）</b>：SDR 接收机把射频信号下变频到基带后，分解为两个正交分量 I(t) 和 Q(t)。它们共同构成复数 IQ = I + jQ。
-          对于窄带信号，I 和 Q 看起来像正弦/余弦振荡。</p>
-        <p><b>|IQ|（包络 / 瞬时幅度）</b>：√(I² + Q²)。去掉载波振荡后剩下的"信号强度包络"。
-          <b>这才是 sferic 检测真正看的东西</b>——一个尖锐的 |IQ| 突起 = 一次闪电回击。</p>
-        <p><b>典型 sferic 形状</b>：</p>
+        <p><b>三张图从上到下：</b></p>
         <ul>
-          <li><b>尖锐窄脉冲</b>：近距离（&lt; 100 km）闪电回击，duration 几 μs</li>
-          <li><b>缓慢起伏</b>：远距离（&gt; 1000 km）经电离层波导传播的 sferic，duration 几十 μs</li>
-          <li><b>多次连续突起</b>：多回击闪电（典型 3-5 次回击，间隔 ~50ms）</li>
-          <li><b>缓升缓降</b>：噪声或干扰（非闪电）</li>
+          <li><b>包络轨迹</b>：flash 触发前后共 ~1.4 s 的 \|IQ\| 包络起伏。横轴 0 ms 是触发时刻；左侧是 pre-trigger，右侧是 post-trigger。黄色虚线标峰值位置。</li>
+          <li><b>窗口平均频谱</b>：整段捕获 IQ 的 FFT 平方在频域上做平均 (power spectrum)，256 bin 下采样到显示宽度。反映 flash 期间能量在频域上的分布。</li>
+          <li><b>峰值附近 IQ 切片</b>：峰值 ±25 ms 的原始 IQ 同相/正交分量 + \|IQ\| 包络，让你看清载波波形。</li>
         </ul>
-        <p><b>窗口长度说明</b>：当前捕获的是事件前后 ~4096 samples 的窗口（约 0.4 ms @ 10 MSPS）。
-          要看更长时间尺度，把采样率改低（如 2 MSPS → 窗口约 2 ms）即可拉长。</p>
-        <p><b>参数含义</b>：</p>
+        <p><b>关键定义：</b></p>
         <ul>
-          <li><b>peak</b>：窗口内最大瞬时 |IQ|（越接近 1.0 越接近 ADC 满量程/可能饱和）</li>
-          <li><b>rms</b>：窗口内信号均方根幅度（反映平均能量）</li>
-          <li><b>excess (dB)</b>：peak 比滑动均值高出的 dB 数（越大说明事件越显著）</li>
+          <li><b>T<sub>w</sub>（窗长）</b>：每 T<sub>w</sub> 算一次窗内 \|IQ\|² 均值 I_k</li>
+          <li><b>T<sub>b</sub>（baseline 时长）</b>：回看 T<sub>b</sub> 内的 I_k 求 baseline</li>
+          <li><b>Δ（触发阈值）</b>：I_k − baseline &gt; Δ 触发</li>
+          <li><b>T<sub>pre</sub>/T<sub>post</sub></b>：触发前后保存的包络/IQ 长度</li>
+        </ul>
+        <p><b>典型 flash 形状：</b></p>
+        <ul>
+          <li><b>单峰</b>：近距离闪电单次放电</li>
+          <li><b>多峰串</b>：远距离多回击闪电 (3-5 个突起，间隔 ~50 ms)</li>
+          <li><b>缓升缓降</b>：噪声或非闪电干扰</li>
         </ul>
       </div>
     </details>
-    <button class="close-btn" id="sf-close">关闭</button>
+    <button class="close-btn" id="fl-close">关闭</button>
   </div>
 </div>
 
