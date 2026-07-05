@@ -27,13 +27,44 @@ const wfCtx = wfCanvas.getContext("2d", { alpha: false });
 const spCtx = spCanvas.getContext("2d", { alpha: false });
 const envCtx = envCanvas.getContext("2d", { alpha: false });
 
-// 离屏 canvas：单行 spectrum (256×1)，用作 drawImage 源
+// 离屏 canvas：单行 spectrum（宽度跟显示一致，每像素插值取色）
 const lineCanvas = document.createElement("canvas");
-lineCanvas.width = displayBins;
-lineCanvas.height = 1;
 const lineCtx = lineCanvas.getContext("2d", { alpha: false });
-const lineImgData = lineCtx.createImageData(displayBins, 1);
-const lineData = lineImgData.data;
+let lineImgData = null;
+let lineData = null;
+function ensureLineCanvas(w) {
+    if (lineCanvas.width !== w) {
+        lineCanvas.width = w;
+        lineCanvas.height = 1;
+        lineImgData = lineCtx.createImageData(w, 1);
+        lineData = lineImgData.data;
+    }
+}
+
+function resizeWfStorage(newW, newH) {
+    if (wfStorage.width === newW && wfStorage.height === newH) return;
+    const oldW = wfStorage.width;
+    const oldH = wfStorage.height;
+    let tmp = null;
+    if (oldW > 0 && oldH > 0 && oldW === newW) {
+        tmp = document.createElement("canvas");
+        tmp.width = oldW;
+        tmp.height = oldH;
+        tmp.getContext("2d").drawImage(wfStorage, 0, 0);
+    }
+    wfStorage.width = newW;
+    wfStorage.height = newH;
+    wfStorageCtx.fillStyle = "#08090c";
+    wfStorageCtx.fillRect(0, 0, newW, newH);
+    if (tmp) {
+        wfStorageCtx.imageSmoothingEnabled = false;
+        if (newH >= oldH) {
+            wfStorageCtx.drawImage(tmp, 0, newH - oldH);
+        } else {
+            wfStorageCtx.drawImage(tmp, 0, oldH - newH, oldW, newH, 0, 0, newW, newH);
+        }
+    }
+}
 
 // 离屏 canvas：瀑布显示尺寸的"数据层"（不做 DPR 缩放，保持低像素数）
 const wfStorage = document.createElement("canvas");
@@ -77,17 +108,10 @@ function resizeAll() {
     fitCanvas(wfCanvas);
     fitCanvas(spCanvas);
     fitCanvas(envCanvas);
-    // 瀑布存储层：只在尺寸真变化时重建（避免周期清空！）
+    // 瀑布存储层：尺寸真变化时重建，并把旧内容尽量贴回去（保持最新数据贴底）
     const wfRect = wfCanvas.getBoundingClientRect();
     if (wfRect.width >= 1 && wfRect.height >= 1) {
-        const sw = Math.floor(wfRect.width);
-        const sh = Math.floor(wfRect.height);
-        if (wfStorage.width !== sw || wfStorage.height !== sh) {
-            wfStorage.width = sw;
-            wfStorage.height = sh;
-            wfStorageCtx.fillStyle = "#08090c";
-            wfStorageCtx.fillRect(0, 0, sw, sh);
-        }
+        resizeWfStorage(Math.floor(wfRect.width), Math.floor(wfRect.height));
     }
     // 频谱/包络的清空由 render 函数本身负责（renderSpectrum/renderEnvelope 每帧重画）
     // 这里只确保 lineHPx 初始化
@@ -124,26 +148,35 @@ function pushWaterfallLine(spec) {
         );
     }
 
-    // 2) 把新一行画到离屏底部
-    // 先填 lineCanvas (256×1)
-    for (let i = 0; i < displayBins; i++) {
-        const db = spec[i];
-        const idx = Math.max(0, Math.min(255, Math.floor((db + 60) * 255 / 60)));
-        lineData[i*4]   = COLORMAP[idx*3];
-        lineData[i*4+1] = COLORMAP[idx*3+1];
-        lineData[i*4+2] = COLORMAP[idx*3+2];
-        lineData[i*4+3] = 255;
+    // 2) 把新一行画到离屏底部：每显示列都按 spectrum 插值取色，colormap 再插值
+    ensureLineCanvas(sw);
+    for (let col = 0; col < sw; col++) {
+        const binF = (col + 0.5) * displayBins / sw;
+        const i0 = binF | 0;
+        const i1 = i0 < displayBins - 1 ? i0 + 1 : i0;
+        const frac = binF - i0;
+        const db = spec[i0] * (1 - frac) + spec[i1] * frac;
+        let idx = (db + 60) * 255 / 60;
+        if (idx < 0) idx = 0; else if (idx > 255) idx = 255;
+        const c0 = idx | 0;
+        const c1 = c0 < 255 ? c0 + 1 : c0;
+        const cfrac = idx - c0;
+        const px = col * 4;
+        lineData[px]   = COLORMAP[c0*3]   * (1 - cfrac) + COLORMAP[c1*3]   * cfrac;
+        lineData[px+1] = COLORMAP[c0*3+1] * (1 - cfrac) + COLORMAP[c1*3+1] * cfrac;
+        lineData[px+2] = COLORMAP[c0*3+2] * (1 - cfrac) + COLORMAP[c1*3+2] * cfrac;
+        lineData[px+3] = 255;
     }
     lineCtx.putImageData(lineImgData, 0, 0);
-    // GPU 缩放贴到离屏底部
+    // GPU 1:1 横向贴到离屏底部（只在纵向拉伸lh倍，因 imageSmoothingEnabled=false）
     wfStorageCtx.imageSmoothingEnabled = false;
-    wfStorageCtx.drawImage(lineCanvas, 0, 0, displayBins, 1, 0, sh - lh, sw, lh);
+    wfStorageCtx.drawImage(lineCanvas, 0, 0, sw, 1, 0, sh - lh, sw, lh);
 
     // 3) 一次性 blit 离屏到主显示 canvas
     wfCtx.imageSmoothingEnabled = false;
     wfCtx.drawImage(wfStorage, 0, 0, sw, sh, 0, 0, wfCanvas.width, wfCanvas.height);
 
-    $("waterfall-info").textContent = `${sh}px × ${displayBins} bins`;
+    $("waterfall-info").textContent = `${sh}px × ${sw}px (${displayBins} bins)`;
 }
 
 function renderWaterfallClear() {
