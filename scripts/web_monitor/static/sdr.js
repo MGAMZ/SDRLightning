@@ -619,23 +619,19 @@ function updateDisplayLayout() {
     if (display) display.style.gridTemplateRows = rows.join(' ');
 }
 
-function toggleCard(name, action) {
-    const card = document.getElementById(`card-${name}`);
+function toggleCollapse(card) {
     if (!card) return;
-    if (action === "collapse") {
-        card.classList.toggle("collapsed");
-        updateDisplayLayout();
-        requestAnimationFrame(resizeAll);
-    } else if (action === "expand") {
-        // 移除所有 expanded，再给自己加
-        document.querySelectorAll(".card.expanded").forEach(c => c.classList.remove("expanded"));
-        card.classList.toggle("expanded");
-    }
+    card.classList.toggle("collapsed");
+    updateDisplayLayout();
+    requestAnimationFrame(resizeAll);
 }
 
-document.querySelectorAll(".card-btn").forEach(b => {
-    b.addEventListener("click", () => {
-        toggleCard(b.dataset.card, b.dataset.action);
+document.querySelectorAll(".card-header").forEach(h => {
+    h.addEventListener("click", (e) => {
+        const card = h.closest(".card");
+        if (!card) return;
+        if (e.target.closest("a, button, input, select, textarea")) return;
+        toggleCollapse(card);
     });
 });
 updateDisplayLayout();
