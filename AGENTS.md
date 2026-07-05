@@ -2,7 +2,7 @@
 
 ## What this repo is
 
-Single-process Web SDR for an SDRplay RSP1 used as a VLF sferics (lightning) detector. Runs on **Windows (native) or Linux/WSL2**. Architecture: SDR reader thread → Flask-SocketIO → browser canvas. Main entrypoint: `scripts/web_monitor.py`.
+Multi-process Web SDR for an SDRplay RSP1 used as a VLF sferics (lightning) detector. Runs on **Windows (native) or Linux/WSL2**. Architecture: `scripts/sdr_reader.py` 子进程 (readStream → `multiprocessing.Queue`) → `scripts/web_monitor.py` 主进程 (FFT/env/flash/Flask-SocketIO) → browser canvas. Main entrypoint: `scripts/web_monitor.py`.
 
 ## Hardware/software chain (load-bearing)
 
@@ -28,7 +28,7 @@ All pieces must work or `SoapySDRUtil --probe="driver=sdrplay"` shows nothing.
 ## Critical quirks (these took hours to find — do not "fix" without reading this)
 
 1. **Gain order matters**: `setGainMode(SOAPY_Rx, 0, False)` MUST run before any `setGain(...)`. With AGC on, SoapySDRPlay3 silently ignores `setGain` calls.
-2. **Small `readStream` chunks only**: chunk sizes ≥4096 samples trigger `SOAPY_SDR_STREAM_ERROR` under WSL2 USB passthrough. Use **1024**. Throughput caps at ~0.35 MSPS regardless of requested rate.
+2. **`STREAMING_USB_MODE_BULK=ON` 必须开** (`third_party/SoapySDRPlay3/CMakeLists.txt:42`，默认 ON)。OFF (默认 ISO) 在 WSL2 USB passthrough 下 0.5% reads 会卡 100ms+，SDR 实际只能 1.5 MSPS / 8 emit/s。ON 后: 10.25 MSPS, 15 emit/s, vslow=0。重建命令: `rm -rf build && mkdir build && cd build && cmake -DSTREAMING_USB_MODE_BULK=ON .. && make -j4 && cp libsdrPlaySupport.so ../../install/lib/SoapySDR/modules0.8/`。
 3. **One device, one client**: on Linux, `sdrplay_apiService` serializes USB access. Close `realtime_monitor.py` before opening `web_monitor.py` or vice versa — the second one will silently fail to enumerate. On Windows the SDRplay API service is more forgiving but same single-device rule applies.
 4. **Canvas self-copy is a black-canvas trap**: `ctx.drawImage(canvas, ...)` on the same canvas produces blank output in some GPU paths. Waterfall uses an offscreen storage canvas (`wfStorage`) + single blit per frame.
 5. **`canvas.width = N` ALWAYS clears**: even if size unchanged. Guard with `if (c.width !== newW || c.height !== newH)` before assigning, or 2-second `setInterval(resizeAll)` will erase the waterfall periodically. (This bug actually shipped — see `scripts/web_monitor/static/sdr.js` `fitCanvas`.)
@@ -100,7 +100,8 @@ The broadband check is essential — without it, AM broadcast carriers (and thei
 
 ## File map (only what's load-bearing)
 
-- `scripts/web_monitor.py` — single process: Flask + SocketIO + SDR reader thread. `SDRState` holds hot-reload config; `_iq_ring` (deque of 4096 complex64) feeds sferic waveform cache.
+- `scripts/web_monitor.py` — 主进程: Flask + SocketIO + multiprocessing.Process(spawn sdr_reader)。`SDRState` holds hot-reload config; `_iq_ring` (deque of 4096 complex64) feeds sferic waveform cache.
+- `scripts/sdr_reader.py` — 子进程 (spawn by web_monitor): `multiprocessing.Queue` 推 IQ chunks 给主进程; `multiprocessing.Pipe` 收主进程 configure 消息。通讯协议见文件顶 docstring.
 - `scripts/web_monitor/static/sdr.js` — frontend. `renderLoop` runs at rAF; `pushWaterfallLine` does 2 GPU ops (scroll + new line). `socket.on("frame")` only assigns `pendingFrame`; renderLoop consumes it.
 - `scripts/web_monitor/templates/index.html` — single page; `?` icons use **JS-positioned `position:fixed` tooltip** (CSS `::after` was clipped by parent's `overflow-y: auto`).
 - `third_party/install/lib/SoapySDR/modules0.8/libsdrPlaySupport.so` — built from `third_party/SoapySDRPlay3/`. Don't replace unless rebuilding.
@@ -134,3 +135,8 @@ The broadband check is essential — without it, AM broadcast carriers (and thei
 ### 实现前调研
 
 仓库内已有 → Python 生态已有 → 联网查业内做法 → 都不可行才自造
+
+## 基于数据事实
+
+当基于程序的输出结果进行分析时，你不应当进行随意猜测，所有的科学分析都要基于数据事实并结合搜索相关权威资料。
+你应当要积极地从当前程序中运行程序并获取实质性数据，提高你的结论的准确性和科学性。
