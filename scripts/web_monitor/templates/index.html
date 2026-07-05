@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>RSP1 Lightning Monitor</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+</head>
+<body>
+
+<header>
+  <h1>⚡ RSP1 Lightning Monitor</h1>
+  <div class="status">
+    <span id="status-dot" class="dot"></span>
+    <span id="status-text">连接中…</span>
+    <span class="sep">|</span>
+    <span id="fps">FPS: --</span>
+    <span class="sep">|</span>
+    <span id="sample-rate">SR: --</span>
+    <span class="sep">|</span>
+    <span id="samples-total">Samples: --</span>
+    <span class="sep">|</span>
+    <span id="sferic-count">Sferics: 0</span>
+    <span class="sep">|</span>
+    <span id="peak-info">Peak: --</span>
+    <span class="sep">|</span>
+    <span id="uptime">Up: --</span>
+  </div>
+</header>
+
+<div id="warn-banner" class="warn-banner" style="display:none">
+  <span id="warn-icon">⚠</span>
+  <span id="warn-text"></span>
+  <button id="warn-dismiss">×</button>
+</div>
+
+<div class="main">
+  <aside class="controls">
+    <h2>控制</h2>
+    <div class="control-group">
+      <label>中心频率 (Hz)
+        <span class="tip" data-tip="RSP1 调谐到的中心频率 (Hz)。VLF sferics 主能量在 3-30 kHz，常用 24 kHz；长波导航/广播在 70-200 kHz；FM 广播在 88-108 MHz。RSP1 范围 10 kHz – 2 GHz。">?</span>
+      </label>
+      <input type="number" id="ctl-freq" value="24000" step="100">
+      <small>10 kHz – 2 GHz</small>
+    </div>
+    <div class="control-group">
+      <label>采样率 (Hz)
+        <span class="tip" data-tip="ADC 采样率。越高速率越高，瀑布越清晰，但 USB/CPU 开销越大。WSL2 实测约 0.35 MSPS (无论请求多少)。低采样率 (≤6 MHz) 下 ADC 14 bit。">?</span>
+      </label>
+      <select id="ctl-sr">
+        <option value="200000">200 kSPS</option>
+        <option value="500000">500 kSPS</option>
+        <option value="1000000">1 MSPS</option>
+        <option value="2000000">2 MSPS</option>
+        <option value="5000000">5 MSPS</option>
+        <option value="10000000" selected>10 MSPS</option>
+      </select>
+    </div>
+    <div class="control-group">
+      <label>IFGR (dB): <span id="val-ifgr">39</span>
+        <span class="tip" data-tip="IF Gain Reduction — IF 级的衰减量 (20-59 dB)。
+⚠ 值越大 = 衰减越多 = 总增益越小 = 信号越弱 (Peak 下降)。
+   值越小 = 衰减越少 = 总增益越大 = 信号越强 (Peak 上升)，但 ADC 饱和风险高。
+VLF sferics 一般调到 25-40 之间（背景噪声大，要足够增益）。">?</span>
+      </label>
+      <input type="range" id="ctl-ifgr" min="20" max="59" step="1" value="39">
+    </div>
+    <div class="control-group">
+      <label>RFGR: <span id="val-rfgr">1</span>
+        <span class="tip" data-tip="RF 前端 LNA 档 (0-3)。
+0 = LNA 全增益（适合弱信号，天线小、远距离）。
+3 = LNA 最大衰减（适合强信号，避免前端饱和）。
+VLF 段一般用 0 或 1。FM/广播段建议 2 或 3 防过载。">?</span>
+      </label>
+      <input type="range" id="ctl-rfgr" min="0" max="3" step="1" value="1">
+    </div>
+    <div class="control-group">
+      <label>Sferic 阈值 (dB)
+        <span class="tip" data-tip="包络超过滑动均值多少 dB 算一次 sferic。VLF 段背景噪声下一般 10-15 dB，干净条件下可降到 6-8 dB。">?</span>
+      </label>
+      <input type="number" id="ctl-thresh" value="12" step="0.5" min="3" max="30">
+    </div>
+    <div class="control-group">
+      <label>Sferic 冷却 (s)
+        <span class="tip" data-tip="两次触发之间的最短间隔。真实闪电回击典型间隔 50-200 ms，所以冷却 0.2-0.3 比较合适。">?</span>
+      </label>
+      <input type="number" id="ctl-cooldown" value="0.3" step="0.05" min="0.05">
+    </div>
+    <div class="control-group" style="margin-top:10px">
+      <small style="color:#888">包络 = |IQ| = √(I² + Q²)，即信号瞬时幅度。sferic 在它上面是突然的尖峰。</small>
+    </div>
+    <button id="apply-btn">应用</button>
+    <button id="export-btn" class="secondary">导出瀑布图 PNG</button>
+    <p class="hint" id="ctl-msg"></p>
+
+    <h2 style="margin-top:20px">预设频点</h2>
+    <details open>
+      <summary style="cursor:pointer;color:#888;font-size:11px;margin:4px 0">VLF (3–30 kHz)</summary>
+      <button class="preset" data-freq="19800">19.8 kHz · NSS (美海军)</button>
+      <button class="preset" data-freq="24000">24.0 kHz · VLF sferics</button>
+      <button class="preset" data-freq="27000">27.0 kHz · Omega (已停)</button>
+    </details>
+    <details>
+      <summary style="cursor:pointer;color:#888;font-size:11px;margin:4px 0">LF (30–300 kHz)</summary>
+      <button class="preset" data-freq="60000">60.0 kHz · MSF 时间</button>
+      <button class="preset" data-freq="77500">77.5 kHz · DCF77 时间</button>
+      <button class="preset" data-freq="100000">100 kHz · 标准频段</button>
+      <button class="preset" data-freq="153000">153 kHz · RTTY</button>
+      <button class="preset" data-freq="198000">198 kHz · BBC R4</button>
+      <button class="preset" data-freq="270000">270 kHz</button>
+    </details>
+    <details>
+      <summary style="cursor:pointer;color:#888;font-size:11px;margin:4px 0">MF (300 kHz–3 MHz)</summary>
+      <button class="preset" data-freq="530000">530 kHz</button>
+      <button class="preset" data-freq="1000000">1.0 MHz · RTTY</button>
+      <button class="preset" data-freq="1890000">1.89 MHz · RTTY</button>
+      <button class="preset" data-freq="2500000">2.5 MHz</button>
+    </details>
+    <details>
+      <summary style="cursor:pointer;color:#888;font-size:11px;margin:4px 0">HF (3–30 MHz)</summary>
+      <button class="preset" data-freq="3573000">3.573 MHz · FT8</button>
+      <button class="preset" data-freq="5000000">5.0 MHz · WWV</button>
+      <button class="preset" data-freq="7074000">7.074 MHz · FT8</button>
+      <button class="preset" data-freq="10000000">10.0 MHz · WWV</button>
+      <button class="preset" data-freq="14074000">14.074 MHz · FT8</button>
+      <button class="preset" data-freq="15000000">15.0 MHz · WWV</button>
+      <button class="preset" data-freq="21074000">21.074 MHz · FT8</button>
+      <button class="preset" data-freq="25000000">25.0 MHz · WWV</button>
+    </details>
+    <details>
+      <summary style="cursor:pointer;color:#888;font-size:11px;margin:4px 0">VHF (30–300 MHz)</summary>
+      <button class="preset" data-freq="50000000">50 MHz · 6m 业余</button>
+      <button class="preset" data-freq="100000000">100 MHz · FM 段中心</button>
+      <button class="preset" data-freq="144500000">144.5 MHz · 2m 业余</button>
+      <button class="preset" data-freq="162550000">162.55 MHz · NOAA 气象</button>
+    </details>
+    <details>
+      <summary style="cursor:pointer;color:#888;font-size:11px;margin:4px 0">UHF (300–2000 MHz)</summary>
+      <button class="preset" data-freq="433920000">433.92 MHz · ISM</button>
+      <button class="preset" data-freq="915000000">915 MHz · ISM</button>
+      <button class="preset" data-freq="1296000000">1.296 GHz · 23cm 业余</button>
+    </details>
+  </aside>
+
+  <section class="display">
+    <div class="card waterfall-card" id="card-waterfall">
+      <div class="card-header">
+        <h3>瀑布 (Waterfall)</h3>
+        <span id="waterfall-info" class="muted"></span>
+        <span class="card-tools">
+          <button class="card-btn" data-card="waterfall" data-action="expand">⤢</button>
+          <button class="card-btn" data-card="waterfall" data-action="collapse">_</button>
+        </span>
+      </div>
+      <canvas id="waterfall"></canvas>
+    </div>
+
+    <div class="card spectrum-card" id="card-spectrum">
+      <div class="card-header">
+        <h3>频谱 (Spectrum)</h3>
+        <span id="spectrum-info" class="muted"></span>
+        <span class="card-tools">
+          <button class="card-btn" data-card="spectrum" data-action="expand">⤢</button>
+          <button class="card-btn" data-card="spectrum" data-action="collapse">_</button>
+        </span>
+      </div>
+      <canvas id="spectrum"></canvas>
+    </div>
+
+    <div class="card env-card" id="card-env">
+      <div class="card-header">
+        <h3>包络 (Envelope)</h3>
+        <span id="env-info" class="muted"></span>
+        <span class="card-tools">
+          <button class="card-btn" data-card="env" data-action="expand">⤢</button>
+          <button class="card-btn" data-card="env" data-action="collapse">_</button>
+        </span>
+      </div>
+      <canvas id="env"></canvas>
+    </div>
+
+    <div class="card sferic-card" id="card-sferic">
+      <div class="card-header">
+        <h3>Sferics 事件 <small style="color:#888">（点击行查看波形）</small></h3>
+        <span id="sferic-info" class="muted"></span>
+        <span class="card-tools">
+          <button class="card-btn" data-card="sferic" data-action="expand">⤢</button>
+          <button class="card-btn" data-card="sferic" data-action="collapse">_</button>
+        </span>
+      </div>
+      <table id="sferic-table">
+        <thead><tr>
+          <th>#</th><th>t (s)</th><th>peak</th><th>rms</th><th>excess (dB)</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<!-- Sferic 详情 modal -->
+<div class="modal-mask" id="sferic-modal">
+  <div class="modal">
+    <h2>Sferic #<span id="sf-id"></span> · t=<span id="sf-t"></span>s</h2>
+    <div class="meta" id="sf-meta"></div>
+    <canvas id="sf-wave" width="580" height="220"></canvas>
+    <div class="legend">
+      <span><b style="color:#00dd77">I</b> 同相分量 (In-phase)</span>
+      <span><b style="color:#dd3355">Q</b> 正交分量 (Quadrature)</span>
+      <span><b style="color:#ffcc00">|IQ|</b> 包络/瞬时幅度</span>
+      <span id="sf-peak-marker">↑ 峰值位置</span>
+    </div>
+    <details class="how-to-read" open>
+      <summary>📖 如何读这张图（点开/折叠）</summary>
+      <div class="how-to-content">
+        <p><b>坐标轴</b>：横轴是时间，从捕获窗口起点 (0 ms) 到终点（右端 ≈ duration ms）。纵轴上半部分是信号瞬时电压（已归一化到 ±满量程），下半部分是包络强度。</p>
+        <p><b>I / Q（同相 / 正交分量）</b>：SDR 接收机把射频信号下变频到基带后，分解为两个正交分量 I(t) 和 Q(t)。它们共同构成复数 IQ = I + jQ。
+          对于窄带信号，I 和 Q 看起来像正弦/余弦振荡。</p>
+        <p><b>|IQ|（包络 / 瞬时幅度）</b>：√(I² + Q²)。去掉载波振荡后剩下的"信号强度包络"。
+          <b>这才是 sferic 检测真正看的东西</b>——一个尖锐的 |IQ| 突起 = 一次闪电回击。</p>
+        <p><b>典型 sferic 形状</b>：</p>
+        <ul>
+          <li><b>尖锐窄脉冲</b>：近距离（&lt; 100 km）闪电回击，duration 几 μs</li>
+          <li><b>缓慢起伏</b>：远距离（&gt; 1000 km）经电离层波导传播的 sferic，duration 几十 μs</li>
+          <li><b>多次连续突起</b>：多回击闪电（典型 3-5 次回击，间隔 ~50ms）</li>
+          <li><b>缓升缓降</b>：噪声或干扰（非闪电）</li>
+        </ul>
+        <p><b>窗口长度说明</b>：当前捕获的是事件前后 ~4096 samples 的窗口（约 0.4 ms @ 10 MSPS）。
+          要看更长时间尺度，把采样率改低（如 2 MSPS → 窗口约 2 ms）即可拉长。</p>
+        <p><b>参数含义</b>：</p>
+        <ul>
+          <li><b>peak</b>：窗口内最大瞬时 |IQ|（越接近 1.0 越接近 ADC 满量程/可能饱和）</li>
+          <li><b>rms</b>：窗口内信号均方根幅度（反映平均能量）</li>
+          <li><b>excess (dB)</b>：peak 比滑动均值高出的 dB 数（越大说明事件越显著）</li>
+        </ul>
+      </div>
+    </details>
+    <button class="close-btn" id="sf-close">关闭</button>
+  </div>
+</div>
+
+<script src="/static/sdr.js"></script>
+</body>
+</html>

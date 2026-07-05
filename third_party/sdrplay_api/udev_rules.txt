@@ -1,0 +1,3 @@
+# SDRplay RSP family udev rules
+# 让非 root 用户直接访问 RSP1/RSP1A/RSP2/RSPdx 设备的 USB endpoint
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1df7", MODE="0666", GROUP="plugdev"

@@ -1,0 +1,5 @@
+data/
+*.cfile
+*.bin
+__pycache__/
+*.pyc
