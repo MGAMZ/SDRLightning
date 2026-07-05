@@ -268,12 +268,14 @@ canvas {
     font-family: ui-monospace, monospace;
 }
 .modal-section canvas {
-    width: 100%;
+    width: 100% !important;
+    height: 140px !important;
     background: #08090c;
     border-radius: 3px;
     display: block;
     image-rendering: pixelated;
 }
+#fl-iq { height: 180px !important; }
 .modal-mask {
     position: fixed;
     inset: 0;
@@ -291,6 +293,8 @@ canvas {
     padding: 18px 22px;
     min-width: 600px;
     max-width: 90vw;
+    max-height: 90vh;
+    overflow-y: auto;
     box-shadow: 0 12px 40px rgba(0,0,0,0.5);
 }
 .modal h2 {
