@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import queue
 import threading
 import time
 from collections import deque
@@ -166,6 +167,13 @@ def _current_eff_rate():
 # flash 详情缓存: id -> dict (envelope_trace, spectrum, iq_peak_slice 等)
 _flash_details = {}
 _MAX_FLASH_CACHE = 50
+
+# 后台 reader 线程 -> 主 reader_loop 的 IQ chunk 队列
+# 队列上限给到 ~1s 缓冲 (1.5 MSPS * 1024 samples/chunk * 1500 chunk/s ~ 1.5M samples)
+# 容量设大些, 让主循环 100ms spike 时不丢数据; 但太大又会堆内存
+_IQ_QUEUE_MAX = 4096
+_iq_queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=_IQ_QUEUE_MAX)
+_reader_thread = None
 
 
 def push_iq_ring(seg: np.ndarray):
@@ -434,10 +442,44 @@ def _finalize_flash(post_capture: dict):
         _flash_details.pop(oldest, None)
 
 
+def _iq_reader_thread():
+    """后台线程: 持续 readStream, 把 chunk 推进 _iq_queue.
+    把 SDR driver 偶发的 ~100ms 卡顿 (USB 调度) 隔离在主循环外, 主循环按
+    队列取数据, 永远不阻塞."""
+    buf = np.empty(state.chunk, dtype=np.complex64)
+    while not _stop_event.is_set():
+        with _sdr_lock, _stream_lock:
+            sdr = _sdr
+            stream = _stream
+        if sdr is None or stream is None:
+            time.sleep(0.1)
+            continue
+        try:
+            ret = sdr.readStream(stream, [buf], state.chunk, timeoutUs=500000)
+        except Exception as e:
+            print(f"[!] readStream 异常: {e}")
+            time.sleep(0.5)
+            continue
+        if ret.ret <= 0:
+            continue
+        seg = buf[:ret.ret].copy()
+        # 队列满: 丢最老的, 保证最新数据流过
+        if _iq_queue.full():
+            try:
+                _iq_queue.get_nowait()
+            except queue.Empty:
+                pass
+        try:
+            _iq_queue.put(seg, timeout=0.5)
+        except queue.Full:
+            pass
+
+
 def reader_loop():
     global _total_samples, _flash_count, _t_start
     global _eff_rate, _eff_rate_acc_samples, _eff_rate_last_t
     global _display_env_acc, _display_env_acc_n, _display_env_last_t
+    global _reader_thread
 
     fft_buf = np.zeros(state.fft_size, dtype=np.complex64)
     fft_n = 0
@@ -462,32 +504,22 @@ def reader_loop():
 
     _rebuild_buffers_for_state()
 
+    # 启动后台 reader 线程 (readStream 在这跑, 100ms spike 不会阻塞主循环)
+    _reader_thread = threading.Thread(target=_iq_reader_thread, daemon=True)
+    _reader_thread.start()
+
     _t_start = time.time()
     print(f"[+] reader 启动, fc={state.center_freq/1e3:.1f} kHz, "
           f"sr={state.sample_rate/1e6:.2f} MSPS")
 
     while not _stop_event.is_set():
-        with _sdr_lock, _stream_lock:
-            sdr = _sdr
-            stream = _stream
-        if sdr is None or stream is None:
-            time.sleep(0.2)
-            continue
-
-        buf = np.empty(state.chunk, dtype=np.complex64)
+        # 从后台 reader 线程的队列里拉数据. timeout 短: 队列空就 continue,
+        # 主循环保持高频空转, 不会因为 readStream 卡顿被拖累.
         try:
-            # timeoutUs 短: readStream 在无数据时最多阻塞 1ms, 防止偶发
-            # ~100ms spike (USB 调度) 把主循环卡住、累积到 throttle gap 里.
-            # 无数据时 ret.ret=0, 下面的 continue 跳过本 iter.
-            ret = sdr.readStream(stream, [buf], state.chunk, timeoutUs=1000)
-        except Exception as e:
-            print(f"[!] readStream 异常: {e}")
-            time.sleep(0.5)
+            seg = _iq_queue.get(timeout=0.001)
+        except queue.Empty:
             continue
-        if ret.ret <= 0:
-            continue
-        seg = buf[: ret.ret]
-        _total_samples += ret.ret
+        _total_samples += len(seg)
         push_iq_ring(seg)
 
         # 峰值 (给溢出检测用)
