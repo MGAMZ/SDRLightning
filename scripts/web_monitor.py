@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 import queue
 import threading
 import time
@@ -206,7 +207,90 @@ def snapshot_iq_ring() -> np.ndarray:
     return np.concatenate([_iq_ring[_iq_ring_pos:], _iq_ring[:_iq_ring_pos]]).copy()
 
 
-# ============== SDR 控制 ==============
+# ============== SDR 控制 (multiprocessing) ==============
+# 主进程不直接 link SoapySDR, 而是 spawn 一个独立进程跑 sdr_reader.py
+# (避免 callback 线程的 USB 死区 / Python GIL 抢占主进程的 web 服务).
+# 数据路径: sdr_reader -> multiprocessing.Queue -> main reader_loop
+# 控制路径: main -> multiprocessing.Pipe (duplex=False) -> sdr_reader
+
+_sdr_reader_proc = None
+_sdr_ctrl = None   # parent 端 (write end)
+_sdr_data_q = None
+
+
+def _start_sdr_reader(initial: dict, chunk_size: int):
+    """spawn sdr_reader 子进程, 建立 data Queue + control Pipe.
+
+    initial 里要有: center_freq, sample_rate, gain (可选).
+    返回 (data_q, parent_ctrl). 失败抛异常.
+
+    Note: Pipe(duplex=False) 时 conn1=READ, conn2=WRITE.
+    Parent 要发控制, child 要收, 所以 parent 拿 conn2 (write),
+    child 拿 conn1 (read).
+    """
+    global _sdr_reader_proc, _sdr_ctrl, _sdr_data_q
+    # child_read 拿 conn1 (read 端), parent_write 拿 conn2 (write 端)
+    child_read, parent_write = multiprocessing.Pipe(duplex=False)
+    data_q = multiprocessing.Queue(maxsize=4096)
+    proc = multiprocessing.Process(
+        target=_sdr_reader_entry,
+        args=(child_read, data_q, chunk_size),
+        daemon=True,
+    )
+    proc.start()
+    child_read.close()  # parent 端关掉 child 端 (防泄漏, 子进程自己也有 close)
+    # 第一个消息传初始 config (parent_write 发, child_read 收)
+    parent_write.send(initial)
+    _sdr_reader_proc = proc
+    _sdr_ctrl = parent_write
+    _sdr_data_q = data_q
+    print(f"[+] sdr_reader 子进程已启动, pid={proc.pid}")
+    return data_q, parent_write
+
+
+def _sdr_reader_entry(ctrl, data_q, chunk_size):
+    """子进程入口: 套一层 traceback 转 stderr, 调 sdr_reader.reader_main."""
+    import sdr_reader
+    try:
+        sdr_reader.reader_main(ctrl, data_q, chunk_size)
+    except KeyboardInterrupt:
+        print(f"[sdr_reader] interrupted", file=__import__("sys").stderr, flush=True)
+    except Exception as e:
+        import traceback
+        print(f"[sdr_reader] FATAL: {e}", file=__import__("sys").stderr, flush=True)
+        traceback.print_exc(file=__import__("sys").stderr)
+        __import__("sys").exit(1)
+
+
+def _send_sdr_config(key: str, value) -> bool:
+    """主进程发配置变更给 sdr_reader."""
+    if _sdr_ctrl is None:
+        return False
+    try:
+        _sdr_ctrl.send({"type": "configure", "key": key, "value": value})
+        return True
+    except (BrokenPipeError, OSError):
+        return False
+
+
+def _stop_sdr_reader():
+    global _sdr_reader_proc, _sdr_ctrl, _sdr_data_q
+    if _sdr_ctrl is not None:
+        try:
+            _sdr_ctrl.send({"type": "shutdown"})
+        except (BrokenPipeError, OSError):
+            pass
+    if _sdr_reader_proc is not None:
+        _sdr_reader_proc.join(timeout=2.0)
+        if _sdr_reader_proc.is_alive():
+            _sdr_reader_proc.terminate()
+            _sdr_reader_proc.join(timeout=1.0)
+    _sdr_reader_proc = None
+    _sdr_ctrl = None
+    _sdr_data_q = None
+
+
+# ============== SDR 控制 (legacy in-process, --no-sdr 模式用) ==============
 def open_sdr():
     """打开/重开 RSP1 流"""
     global _sdr, _stream
@@ -502,22 +586,35 @@ def reader_loop():
 
     _rebuild_buffers_for_state()
 
-    # 启动后台 reader 线程 (readStream 在这跑, 100ms spike 不会阻塞主循环)
-    _reader_thread = threading.Thread(target=_iq_reader_thread, daemon=True)
-    _reader_thread.start()
+    # 兼容两种数据源:
+    # 1. --no-sdr 模式 / bench 模式: 走 in-process _iq_reader_thread + _iq_queue
+    # 2. 正常模式: 走独立进程 sdr_reader + _sdr_data_q (multiprocessing.Queue)
+    use_subprocess = _sdr_data_q is not None
+    if not use_subprocess:
+        # bench / --no-sdr 路径, 用之前的 in-process 线程
+        _reader_thread = threading.Thread(target=_iq_reader_thread, daemon=True)
+        _reader_thread.start()
 
     _t_start = time.time()
     print(f"[+] reader 启动, fc={state.center_freq/1e3:.1f} kHz, "
-          f"sr={state.sample_rate/1e6:.2f} MSPS")
+          f"sr={state.sample_rate/1e6:.2f} MSPS, "
+          f"subprocess={use_subprocess}")
 
     while not _stop_event.is_set():
-        # 从后台 reader 线程的队列里拉数据. timeout 短: 队列空就 continue,
-        # 主循环保持高频空转, 不会因为 readStream 卡顿被拖累.
-        try:
-            seg = _iq_queue.get(timeout=0.001)
-        except queue.Empty:
-            continue
-        _total_samples += len(seg)
+        # 1. 取一个 chunk
+        if use_subprocess:
+            # 从独立进程拉. 短 timeout 防止主循环被死区卡住.
+            try:
+                seg = _sdr_data_q.get(timeout=0.001)
+            except queue.Empty:
+                continue
+        else:
+            try:
+                seg = _iq_queue.get(timeout=0.001)
+            except queue.Empty:
+                continue
+        chunk_len = len(seg)
+        _total_samples += chunk_len
         push_iq_ring(seg)
 
         # 峰值 (给溢出检测用)
@@ -525,7 +622,7 @@ def reader_loop():
         peak_ema = peak_ema * 0.97 + peak_now * 0.03
 
         # === 有效采样率估计 (每 1s 一次 EMA) ===
-        _eff_rate_acc_samples += ret.ret
+        _eff_rate_acc_samples += chunk_len
         t_now = time.time()
         if _eff_rate_last_t == 0.0:
             _eff_rate_last_t = t_now
@@ -703,11 +800,26 @@ def api_control():
                 state.fft_size = int(v)
 
     if restart_needed:
-        reopen_sdr()
+        # sample_rate 变 -> 要重启 SDR. 在多进程模式下整个重启 sdr_reader.
+        if _sdr_reader_proc is not None:
+            _stop_sdr_reader()
+            _start_sdr_reader(
+                {"center_freq": state.center_freq, "sample_rate": state.sample_rate,
+                 "gain": None}, state.chunk,
+            )
     else:
-        if apply_config_to_sdr():
+        if _sdr_reader_proc is not None:
+            # 多进程模式: 把配置通过 Pipe 推给 sdr_reader, 它直接调 SoapySDR
+            for k, v in data.items():
+                if k in ("center_freq", "sample_rate", "gain"):
+                    _send_sdr_config(k, v)
             _running["ok"] = True
             _running["msg"] = "ok"
+        else:
+            # --no-sdr 模式 (bench 或无硬件): 旧路径
+            if apply_config_to_sdr():
+                _running["ok"] = True
+                _running["msg"] = "ok"
 
     return jsonify({"ok": _running["ok"], "state": state.to_dict()})
 
@@ -807,17 +919,25 @@ def main():
         return
 
     if not args.no_sdr:
-        # 尝试打开 SDR；如果失败（设备被占），启动后台重试线程
+        # 多进程模式: spawn 独立 sdr_reader 进程拉数据, IPC 走 multiprocessing.Queue.
+        # 主进程 web 服务跟 SoapySDR 完全解耦, 死区 / 重连不影响 HTTP 服务.
+        # 如果启动失败, 仍然跑 web (在 _running 里标记, 后续重试).
         try:
-            open_sdr()
+            _start_sdr_reader(
+                {
+                    "center_freq": state.center_freq,
+                    "sample_rate": state.sample_rate,
+                    "gain": None,
+                },
+                state.chunk,
+            )
             _running["ok"] = True
-            _running["msg"] = "ok"
+            _running["msg"] = "ok (sdr_reader 子进程已启动)"
         except Exception as e:
             _running["ok"] = False
             _running["msg"] = f"等待设备: {e}"
-            print(f"[!] SDR 启动失败: {e}")
-            print("[!] 仍会启动 web 框架 + 后台重试连接")
-            threading.Thread(target=retry_open_sdr_loop, daemon=True).start()
+            print(f"[!] sdr_reader 启动失败: {e}")
+            print("[!] 仍会启动 web 框架; sdr_reader 失败不影响 HTTP")
     else:
         _running["ok"] = False
         _running["msg"] = "no-sdr 模式"
@@ -838,6 +958,7 @@ def main():
         )
     finally:
         _stop_event.set()
+        _stop_sdr_reader()
         with _stream_lock, _sdr_lock:
             close_sdr_unlocked()
         print("[+] 退出")
