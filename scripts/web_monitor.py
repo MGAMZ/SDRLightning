@@ -476,7 +476,10 @@ def reader_loop():
 
         buf = np.empty(state.chunk, dtype=np.complex64)
         try:
-            ret = sdr.readStream(stream, [buf], state.chunk, timeoutUs=500000)
+            # timeoutUs 短: readStream 在无数据时最多阻塞 1ms, 防止偶发
+            # ~100ms spike (USB 调度) 把主循环卡住、累积到 throttle gap 里.
+            # 无数据时 ret.ret=0, 下面的 continue 跳过本 iter.
+            ret = sdr.readStream(stream, [buf], state.chunk, timeoutUs=1000)
         except Exception as e:
             print(f"[!] readStream 异常: {e}")
             time.sleep(0.5)
@@ -885,7 +888,32 @@ def run_bench(args):
     print(f"  max_iters_between_emits: {BENCH.get('max_iters_between', 0)}")
     print(f"  max_wall_between_emits (s): "
           f"{BENCH.get('max_wall_between', 0):.4f}")
+    samples = BENCH.get("gap_samples", [])
+    if samples:
+        samples_sorted = sorted(samples)
+        n = len(samples_sorted)
+        print(f"  emit-gap samples (n={n}): "
+              f"min={samples_sorted[0]*1000:.1f}ms "
+              f"p50={samples_sorted[n//2]*1000:.1f}ms "
+              f"p95={samples_sorted[int(n*0.95)]*1000:.1f}ms "
+              f"max={samples_sorted[-1]*1000:.1f}ms")
+        # 期望: 全部 = 66ms (throttle gap). 大于 66ms = throttle 漏窗口.
+        over = sum(1 for g in samples if g > 0.066 * 1.1)
+        print(f"  gap > 66ms*1.1: {over}/{n} ({over/n*100:.0f}%)")
     print(f"  reads_zero: {BENCH['reads_zero']}")
+    if BENCH["max_iter_wall"] > 0:
+        print(f"  max_iter_wall:  {BENCH['max_iter_wall']*1000:.2f}ms "
+              f"(at iter #{BENCH['max_iter_at']}, expected ~0.67ms)")
+        print(f"  max_read_wall:  {BENCH['max_read_wall']*1000:.2f}ms "
+              f"(at iter #{BENCH['max_read_at']}, expected ~0.62ms)")
+        n = BENCH["iters"]
+        print(f"  read_wall dist: "
+              f"fast(<5ms)={BENCH['read_fast']} ({BENCH['read_fast']/n*100:.1f}%) "
+              f"slow(5-50ms)={BENCH['read_slow']} ({BENCH['read_slow']/n*100:.1f}%) "
+              f"vslow(>=50ms)={BENCH['read_vslow']} ({BENCH['read_vslow']/n*100:.1f}%)")
+        if BENCH["read_vslow"] > 0:
+            print(f"  vslow total: {BENCH['read_total_slow_ms']*1000:.1f}ms "
+                  f"(avg {BENCH['read_total_slow_ms']/BENCH['read_vslow']*1000:.1f}ms/vslow)")
     if iters:
         t_total = BENCH["t_total"]
         print(f"  per-iter: {t_total/iters*1000:.2f}ms total")
@@ -960,6 +988,14 @@ def _bench_loop(no_fft, no_emit, no_flash, no_iq, duration):
         "max_iters_between": 0,
         "max_wall_between": 0.0,
         "t_last_frame": 0.0,
+        "max_iter_wall": 0.0,
+        "max_read_wall": 0.0,
+        "max_iter_at": 0,
+        "max_read_at": 0,
+        "read_fast": 0,    # iters with read < 5ms
+        "read_slow": 0,    # iters with read >= 5ms (slow spike)
+        "read_vslow": 0,   # iters with read >= 50ms
+        "read_total_slow_ms": 0.0,
         "t_last": time.perf_counter(),
         "t_start": time.perf_counter(),
     })
@@ -999,9 +1035,20 @@ def _bench_loop(no_fft, no_emit, no_flash, no_iq, duration):
             continue
 
         t_after_read = time.perf_counter()
+        read_wall = t_after_read - t_iter
+        if read_wall > BENCH["max_read_wall"]:
+            BENCH["max_read_wall"] = read_wall
+            BENCH["max_read_at"] = BENCH["iters"]
+        if read_wall >= 0.050:
+            BENCH["read_vslow"] += 1
+            BENCH["read_total_slow_ms"] += read_wall
+        elif read_wall >= 0.005:
+            BENCH["read_slow"] += 1
+        else:
+            BENCH["read_fast"] += 1
         if ret.ret <= 0:
             BENCH["reads_zero"] += 1
-            BENCH["t_readStream"] += t_after_read - t_iter
+            BENCH["t_readStream"] += read_wall
             _bench_print_stats(BENCH)
             continue
         seg = buf[: ret.ret]
@@ -1063,25 +1110,51 @@ def _bench_loop(no_fft, no_emit, no_flash, no_iq, duration):
         t_emit_start = time.perf_counter()
         if not no_emit:
             t_now = time.perf_counter()
-            if t_now - BENCH["t_last_frame"] >= 0.066 and _waterfall:
+            gap = t_now - BENCH["t_last_frame"]
+            # 调试: 每次 emit 记录 gap, 跟 0.066 对比
+            if gap >= 0.066 and _waterfall:
                 # 记录两次 emit 之间的 iters 和时间
                 iters_between = BENCH["iters"] - BENCH.get("iters_at_last_emit", 0)
                 wall_between = t_now - BENCH.get("t_at_last_emit", BENCH["t_start"])
-                BENCH.setdefault("max_iters_between", 0)
-                BENCH.setdefault("max_wall_between", 0.0)
-                if iters_between > BENCH["max_iters_between"]:
+                if iters_between > BENCH.get("max_iters_between", 0):
                     BENCH["max_iters_between"] = iters_between
-                if wall_between > BENCH["max_wall_between"]:
+                if wall_between > BENCH.get("max_wall_between", 0):
                     BENCH["max_wall_between"] = wall_between
+                # 收集 emit 触发时的 gap 分布
+                BENCH.setdefault("gap_samples", [])
+                BENCH["gap_samples"].append(gap)
+                if len(BENCH["gap_samples"]) > 200:
+                    BENCH["gap_samples"] = BENCH["gap_samples"][-200:]
                 BENCH["iters_at_last_emit"] = BENCH["iters"]
                 BENCH["t_at_last_emit"] = t_now
                 BENCH["t_last_frame"] = t_now
                 BENCH["emits"] += 1
+                # 第一/二/三个 emit 打 trace
+                if BENCH["emits"] <= 3 or BENCH["emits"] % 50 == 0:
+                    print(f"[emit #{BENCH['emits']:03d}] "
+                          f"gap={gap*1000:.2f}ms "
+                          f"iters_between={iters_between} "
+                          f"t_last_frame={BENCH['t_last_frame']*1000:.1f}ms "
+                          f"t_now={t_now*1000:.1f}ms")
         BENCH["t_emit"] += time.perf_counter() - t_emit_start
 
         BENCH["iters"] += 1
-        BENCH["t_readStream"] += t_after_read - t_iter
-        BENCH["t_total"] += time.perf_counter() - t_iter
+        total_wall = time.perf_counter() - t_iter
+        if total_wall > BENCH["max_iter_wall"]:
+            BENCH["max_iter_wall"] = total_wall
+            BENCH["max_iter_at"] = BENCH["iters"]
+        BENCH["t_readStream"] += read_wall
+        BENCH["t_total"] += total_wall
+
+        # 每 50 iters 打一行 (调试 throttle 行为)
+        if not no_emit and BENCH["iters"] % 50 == 0:
+            g = time.perf_counter() - BENCH["t_last_frame"]
+            now_abs = time.perf_counter()
+            print(f"[iter #{BENCH['iters']:05d}] gap={g*1000:.2f}ms "
+                  f"t_now_rel={(now_abs-BENCH['t_start'])*1000:.1f}ms "
+                  f"t_last_frame={BENCH['t_last_frame']*1000:.1f}ms "
+                  f"now_abs={now_abs*1000:.1f}ms "
+                  f"t_start={BENCH['t_start']*1000:.1f}ms")
 
         _bench_print_stats(BENCH)
 
