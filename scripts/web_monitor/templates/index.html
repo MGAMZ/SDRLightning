@@ -38,10 +38,12 @@
   <aside class="controls">
     <h2>控制</h2>
     <div class="control-group">
-      <label>中心频率 (Hz)
-        <span class="tip" data-tip="RSP1 调谐到的中心频率 (Hz)。VLF sferics 主能量在 3-30 kHz，常用 24 kHz；长波导航/广播在 70-200 kHz；FM 广播在 88-108 MHz。RSP1 范围 10 kHz – 2 GHz。">?</span>
+      <label>中心频率
+        <span class="tip" data-tip="RSP1 调谐到的中心频率。VLF sferics 主能量在 3-30 kHz，常用 24 kHz；长波导航/广播在 70-200 kHz；FM 广播在 88-108 MHz。RSP1 范围 10 kHz – 2 GHz。
+
+支持单位后缀：50M = 50 MHz，24k = 24 kHz，198000000 = 198 MHz。单位 K / M / G 必须大写。">?</span>
       </label>
-      <input type="number" id="ctl-freq" value="24000" step="100">
+      <input type="text" id="ctl-freq" value="50M" placeholder="50M / 24000 / 24k" autocomplete="off" spellcheck="false">
       <small>10 kHz – 2 GHz</small>
     </div>
     <div class="control-group">

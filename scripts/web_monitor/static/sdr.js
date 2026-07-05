@@ -11,7 +11,28 @@
 const socket = io();
 
 // === 状态 ===
-let centerFreq = 24000;
+let centerFreq = 50e6;
+
+// === 频率解析 / 格式化（支持 K / M / G 后缀，单位必须大写） ===
+function parseFreq(s) {
+    if (s == null) return NaN;
+    s = String(s).trim().replace(/\s+/g, "");
+    const m = s.match(/^([0-9]*\.?[0-9]+)\s*([kKMG]?)$/);
+    if (!m) return NaN;
+    const num = parseFloat(m[1]);
+    if (!isFinite(num)) return NaN;
+    const mult = { "": 1, "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9 }[m[2]];
+    return num * mult;
+}
+function formatFreq(hz) {
+    if (!isFinite(hz) || hz < 0) return String(hz);
+    let val, unit;
+    if (hz >= 1e9)      { val = hz / 1e9; unit = "G"; }
+    else if (hz >= 1e6) { val = hz / 1e6; unit = "M"; }
+    else if (hz >= 1e3) { val = hz / 1e3; unit = "k"; }
+    else                { val = hz;       unit = ""; }
+    return val.toFixed(3).replace(/\.?0+$/, "") + unit;
+}
 let sampleRate = 2000000;
 let fftSize = 1024;
 let displayBins = 256;
@@ -582,7 +603,7 @@ socket.on("state", (s) => {
     centerFreq = s.center_freq;
     sampleRate = s.sample_rate;
     fftSize = s.fft_size;
-    $("ctl-freq").value = s.center_freq;
+    $("ctl-freq").value = formatFreq(s.center_freq);
     $("ctl-sr").value = s.sample_rate;
     $("ctl-ifgr").value = s.ifgr;
     $("val-ifgr").textContent = s.ifgr;
@@ -603,15 +624,21 @@ socket.on("sferic", (ev) => {
 
 // === UI 控制 ===
 function applyControls() {
+    const msg = $("ctl-msg");
+    const freqHz = parseFreq($("ctl-freq").value);
+    if (!isFinite(freqHz) || freqHz <= 0) {
+        msg.textContent = "✗ 频率格式无效 (示例: 50M, 24000, 24k)";
+        msg.className = "hint err";
+        return;
+    }
     const payload = {
-        center_freq: parseFloat($("ctl-freq").value),
+        center_freq: freqHz,
         sample_rate: parseFloat($("ctl-sr").value),
         ifgr: parseInt($("ctl-ifgr").value),
         rfgr: parseInt($("ctl-rfgr").value),
         sferic_thresh_db: parseFloat($("ctl-thresh").value),
         sferic_cooldown: parseFloat($("ctl-cooldown").value),
     };
-    const msg = $("ctl-msg");
     msg.textContent = "应用…";
     msg.className = "hint";
     fetch("/api/control", {
@@ -622,7 +649,7 @@ function applyControls() {
         if (j.ok) {
             centerFreq = payload.center_freq;
             sampleRate = payload.sample_rate;
-            msg.textContent = "✓ 已应用 (sample_rate 变化需 ~1s 重建流)";
+            msg.textContent = `✓ 已应用 → ${formatFreq(payload.center_freq)}`;
             msg.className = "hint";
             $("sample-rate").textContent = `SR: ${(payload.sample_rate/1e6).toFixed(2)} MSPS`;
             // 状态变化可能导致布局抖动，强制重测尺寸
@@ -647,7 +674,8 @@ $("ctl-rfgr").addEventListener("input", e => { $("val-rfgr").textContent = e.tar
 document.querySelectorAll(".preset").forEach(b => {
     b.addEventListener("click", () => {
         // 只改中心频率，不动采样率（用户自行决定 SR）
-        $("ctl-freq").value = b.dataset.freq;
+        const hz = parseFloat(b.dataset.freq);
+        $("ctl-freq").value = formatFreq(hz);
         applyControls();
     });
 });
@@ -671,7 +699,7 @@ fetch("/api/state").then(r => r.json()).then(s => {
     centerFreq = s.center_freq;
     sampleRate = s.sample_rate;
     fftSize = s.fft_size;
-    $("ctl-freq").value = s.center_freq;
+    $("ctl-freq").value = formatFreq(s.center_freq);
     $("ctl-sr").value = s.sample_rate;
     $("ctl-ifgr").value = s.ifgr;
     $("val-ifgr").textContent = s.ifgr;

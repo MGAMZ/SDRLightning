@@ -67,7 +67,7 @@ class SDRState:
     """可热改的配置"""
 
     def __init__(self):
-        self.center_freq = 24e3
+        self.center_freq = 50e6
         self.sample_rate = 10e6   # 默认 10 MSPS（用户偏好）
         self.bandwidth = 0
         self.ifgr = 39
