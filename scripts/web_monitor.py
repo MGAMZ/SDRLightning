@@ -757,8 +757,21 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--no-sdr", action="store_true",
-                        help="不连硬件，只跑 web 框架（调试用）")
+                        help="不连硬件，只跑 web 框架（调试用)")
+    parser.add_argument("--bench", action="store_true",
+                        help="bench 模式: 不开 web, 分阶段计时 reader_loop, "
+                             "每秒打印一次统计, 跑 --bench-duration 秒后退出")
+    parser.add_argument("--bench-duration", type=float, default=20.0,
+                        help="bench 模式运行时长 (秒)")
+    parser.add_argument("--bench-flags", default="",
+                        help="bench 控制位 (逗号分隔): "
+                             "no-fft=跳过 FFT, no-emit=跳过 frame emit, "
+                             "no-flash=跳过 flash 检测, no-iq=跳过 IQ ring")
     args = parser.parse_args()
+
+    if args.bench:
+        run_bench(args)
+        return
 
     if not args.no_sdr:
         # 尝试打开 SDR；如果失败（设备被占），启动后台重试线程
@@ -780,6 +793,258 @@ def main():
     if not args.no_sdr and _running["ok"]:
         _reader_thread = threading.Thread(target=reader_loop, daemon=True)
         _reader_thread.start()
+
+    print(f"[+] Web 服务: http://{args.host}:{args.port}")
+    try:
+        socketio.run(
+            app,
+            host=args.host,
+            port=args.port,
+            debug=False,
+            allow_unsafe_werkzeug=True,  # 单进程 dev 用
+        )
+    finally:
+        _stop_event.set()
+        with _stream_lock, _sdr_lock:
+            close_sdr_unlocked()
+        print("[+] 退出")
+
+
+# ============== Bench 模式 ==============
+def run_bench(args):
+    """不开 web, 直接跑 reader_loop, 每秒打印分阶段计时统计."""
+    flags = {f.strip() for f in args.bench_flags.split(",") if f.strip()}
+    no_fft = "no-fft" in flags
+    no_emit = "no-emit" in flags
+    no_flash = "no-flash" in flags
+    no_iq = "no-iq" in flags
+    print(f"[bench] flags: no-fft={no_fft} no-emit={no_emit} "
+          f"no-flash={no_flash} no-iq={no_iq}")
+    print(f"[bench] fc={state.center_freq/1e3:.1f} kHz, "
+          f"sr={state.sample_rate/1e6:.2f} MSPS, "
+          f"fft_size={state.fft_size}, chunk={state.chunk}, "
+          f"flash_window_ms={state.flash_window_ms}")
+
+    # 打开 SDR
+    try:
+        open_sdr()
+        _running["ok"] = True
+        _running["msg"] = "ok"
+    except Exception as e:
+        print(f"[bench] SDR 打开失败: {e}")
+        return
+
+    # 重置全局 bench 计数 + 打开 reader_loop 内部计时
+    BENCH = {
+        "t_readStream": 0.0,
+        "t_env": 0.0,
+        "t_flash": 0.0,
+        "t_fft": 0.0,
+        "t_emit": 0.0,
+        "t_iq": 0.0,
+        "t_total": 0.0,
+        "iters": 0,
+        "samples": 0,
+        "ffts": 0,
+        "emits": 0,
+        "reads_zero": 0,
+        "t_last": time.perf_counter(),
+        "t_start": time.perf_counter(),
+    }
+    print(f"[bench] running for {args.bench_duration:.0f}s ...")
+
+    # 跑 reader_loop 的镜像 (带计时)
+    _bench_loop(no_fft, no_emit, no_flash, no_iq, args.bench_duration)
+
+    # 汇总
+    dt_total = time.perf_counter() - BENCH["t_start"]
+    iters = BENCH["iters"]
+    samples = BENCH["samples"]
+    print()
+    print("=" * 60)
+    print(f"[bench] TOTAL: {dt_total:.2f}s")
+    print(f"  iters: {iters} ({iters/dt_total:.0f}/s)")
+    print(f"  samples: {samples} ({samples/dt_total:.0f}/s, "
+          f"{samples/dt_total/1e6:.3f} MSPS effective)")
+    print(f"  FFTs: {BENCH['ffts']} ({BENCH['ffts']/dt_total:.0f}/s)")
+    print(f"  emits: {BENCH['emits']} ({BENCH['emits']/dt_total:.2f}/s)")
+    print(f"  reads_zero: {BENCH['reads_zero']}")
+    if iters:
+        t_total = BENCH["t_total"]
+        print(f"  per-iter: {t_total/iters*1000:.2f}ms total")
+        for k in ["t_readStream", "t_env", "t_flash", "t_fft", "t_emit", "t_iq"]:
+            pct = BENCH[k] / t_total * 100 if t_total else 0
+            print(f"    {k:12s} {BENCH[k]/iters*1000:7.2f}ms  ({pct:5.1f}%)")
+        residual = (t_total - sum(BENCH[k] for k in
+                    ["t_readStream", "t_env", "t_flash", "t_fft", "t_emit", "t_iq"])) \
+                    / iters * 1000
+        print(f"    {'other':12s} {residual:7.2f}ms")
+    print("=" * 60)
+
+    _stop_event.set()
+    with _stream_lock, _sdr_lock:
+        close_sdr_unlocked()
+
+
+def _bench_print_stats(BENCH, force=False):
+    now = time.perf_counter()
+    if not force and now - BENCH["t_last"] < 1.0:
+        return
+    dt = now - BENCH["t_last"]
+    if dt <= 0:
+        return
+    iters = BENCH["iters"]
+    samples = BENCH["samples"]
+    print(f"\n[bench +{now - BENCH['t_start']:5.1f}s] "
+          f"iters={iters/dt:5.0f}/s samples={samples/dt/1e3:7.1f}kS/s "
+          f"FFTs={BENCH['ffts']/dt:4.0f}/s emits={BENCH['emits']/dt:5.2f}/s "
+          f"reads0={BENCH['reads_zero']}")
+    if iters:
+        t_total = BENCH["t_total"]
+        print(f"          per-iter {t_total/iters*1000:5.2f}ms | "
+              f"read={BENCH['t_readStream']/iters*1000:5.2f} "
+              f"env={BENCH['t_env']/iters*1000:4.2f} "
+              f"flash={BENCH['t_flash']/iters*1000:4.2f} "
+              f"fft={BENCH['t_fft']/iters*1000:5.2f} "
+              f"emit={BENCH['t_emit']/iters*1000:4.2f} "
+              f"iq={BENCH['t_iq']/iters*1000:4.2f}")
+    BENCH["t_readStream"] = 0.0
+    BENCH["t_env"] = 0.0
+    BENCH["t_flash"] = 0.0
+    BENCH["t_fft"] = 0.0
+    BENCH["t_emit"] = 0.0
+    BENCH["t_iq"] = 0.0
+    BENCH["t_total"] = 0.0
+    BENCH["iters"] = 0
+    BENCH["samples"] = 0
+    BENCH["ffts"] = 0
+    BENCH["emits"] = 0
+    BENCH["reads_zero"] = 0
+    BENCH["t_last"] = now
+
+
+def _bench_loop(no_fft, no_emit, no_flash, no_iq, duration):
+    """reader_loop 的镜像, 每阶段 perf_counter 计时."""
+    global BENCH
+    BENCH = {
+        "t_readStream": 0.0, "t_env": 0.0, "t_flash": 0.0,
+        "t_fft": 0.0, "t_emit": 0.0, "t_iq": 0.0, "t_total": 0.0,
+        "iters": 0, "samples": 0, "ffts": 0, "emits": 0, "reads_zero": 0,
+        "t_last": time.perf_counter(),
+        "t_start": time.perf_counter(),
+    }
+    t_end = BENCH["t_start"] + duration
+    fft_buf = np.zeros(state.fft_size, dtype=np.complex64)
+    fft_n = 0
+    win = np.hanning(state.fft_size)
+    win_acc_power = 0.0
+    win_acc_n = 0
+    win_target_n = max(1, int(state.sample_rate * state.flash_window_ms / 1000))
+
+    buf = np.empty(state.chunk, dtype=np.complex64)
+    peak_ema = 0.0
+    last_trigger_t = -1e9
+    post_capture = None
+
+    if not no_iq:
+        _rebuild_buffers_for_state()
+
+    while not _stop_event.is_set():
+        with _sdr_lock, _stream_lock:
+            sdr = _sdr
+            stream = _stream
+        if sdr is None or stream is None:
+            time.sleep(0.2)
+            continue
+
+        t_iter = time.perf_counter()
+        if t_iter > t_end:
+            break
+
+        try:
+            ret = sdr.readStream(stream, [buf], state.chunk, timeoutUs=500000)
+        except Exception as e:
+            print(f"[bench] readStream 异常: {e}")
+            time.sleep(0.5)
+            continue
+
+        t_after_read = time.perf_counter()
+        if ret.ret <= 0:
+            BENCH["reads_zero"] += 1
+            BENCH["t_readStream"] += t_after_read - t_iter
+            _bench_print_stats(BENCH)
+            continue
+        seg = buf[: ret.ret]
+        BENCH["samples"] += ret.ret
+
+        if not no_iq:
+            t0 = time.perf_counter()
+            push_iq_ring(seg)
+            BENCH["t_iq"] += time.perf_counter() - t0
+
+        peak_now = float(np.max(np.abs(seg)))
+        peak_ema = peak_ema * 0.97 + peak_now * 0.03
+        env_now = float(np.mean(np.abs(seg)))
+        _envelope.append(env_now)
+        t_after_env = time.perf_counter()
+        BENCH["t_env"] += t_after_env - t_after_read
+
+        # flash check (cheap, just comparisons)
+        if not no_flash:
+            t_now = time.time()
+            win_acc_power += float(np.sum(np.abs(seg) ** 2))
+            win_acc_n += ret.ret
+            if win_acc_n >= win_target_n:
+                i_k = win_acc_power / win_acc_n
+                i_k_db = 10 * np.log10(i_k + 1e-18)
+                _intensity_ring.append(i_k_db)
+                baseline_db = float(np.mean(_intensity_ring)) if _intensity_ring else -100.0
+                excess_db = i_k_db - baseline_db
+                in_cd = (t_now - last_trigger_t) * 1000 < state.flash_cooldown_ms
+                if (not in_cd) and excess_db > state.flash_thresh_db:
+                    last_trigger_t = t_now
+                win_acc_power = 0.0
+                win_acc_n = 0
+            BENCH["t_flash"] += time.perf_counter() - t_after_env
+
+        # FFT / waterfall
+        t_fft_start = time.perf_counter()
+        n = ret.ret
+        seg_copy = seg
+        while n > 0:
+            space = state.fft_size - fft_n
+            take = min(space, n)
+            fft_buf[fft_n:fft_n + take] = seg_copy[:take]
+            fft_n += take
+            seg_copy = seg_copy[take:]
+            n -= take
+            if fft_n == state.fft_size:
+                if not no_fft:
+                    spec = np.fft.fftshift(np.fft.fft(fft_buf * win))
+                    psd_db = (20 * np.log10(np.abs(spec) + 1e-12)).astype(np.float32)
+                    psd_db -= psd_db.max()
+                    psd_ds = decimate_maxpool(psd_db, DISPLAY_BINS)
+                    _waterfall.append(psd_ds)
+                fft_n = 0
+                BENCH["ffts"] += 1
+        BENCH["t_fft"] += time.perf_counter() - t_fft_start
+
+        # frame emit (simulate; without a connected socketio client this is a no-op but still time the call)
+        t_emit_start = time.perf_counter()
+        if not no_emit:
+            # 模拟 emit 调用, 不真正发包
+            t_last_frame = BENCH.get("t_last_frame", 0.0)
+            t_now_wall = time.time()
+            if t_now_wall - t_last_frame >= 0.066 and _waterfall:
+                BENCH["t_last_frame"] = t_now_wall
+                BENCH["emits"] += 1
+        BENCH["t_emit"] += time.perf_counter() - t_emit_start
+
+        BENCH["iters"] += 1
+        BENCH["t_readStream"] += t_after_read - t_iter
+        BENCH["t_total"] += time.perf_counter() - t_iter
+
+        _bench_print_stats(BENCH)
 
     print(f"[+] Web 服务: http://{args.host}:{args.port}")
     try:
