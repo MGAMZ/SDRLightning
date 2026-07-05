@@ -148,6 +148,9 @@ def _resize_iq_buffer(new_cap):
 # 包络降采样环 (T_pre × f_env 点) 和窗强度环 (T_b / T_w 点)
 _env_ring = deque(maxlen=1)
 _intensity_ring = deque(maxlen=1)
+# 包络降采样跨 chunk 累积余量: 单 chunk 可能不够 spr 整数倍,
+# 不累积会被 int(n/spr) 截断吞掉 (详见 _downsample_envelope_chunk)
+_env_residual = np.zeros(0, dtype=np.float32)
 
 # 实时显示用的包络环 (固定 env_rate_hz, 容量 = env_window_s × env_rate_hz)
 _display_env_ring = deque(maxlen=1)
@@ -394,22 +397,34 @@ def decimate_maxpool(spec: np.ndarray, n_out: int) -> np.ndarray:
 
 
 def _downsample_envelope_chunk(seg: np.ndarray, samples_per_out: float) -> list:
-    """把 seg 的 |seg| 用 max-pool 降采样, 返回 list[float]"""
-    abs_seg = np.abs(seg)
-    n = len(abs_seg)
-    n_out = max(0, int(n / samples_per_out))
+    """把 seg 的 |seg| 用 max-pool 降采样, 返回 list[float].
+
+    跨 chunk 累积 `_env_residual`, 避免 int(n/spr) 截断导致 n_out=0 永远跑空.
+    在 10 MSPS / env_rate=1000 Hz / chunk=1024 这种 spr≈10000 的情况下,
+    单 chunk 不累积就被 int(1024/10000)=0 整个吞掉.
+    """
+    global _env_residual
+    abs_seg = np.abs(seg).astype(np.float32)
+    cat = np.concatenate([_env_residual, abs_seg])
+    cat_n = cat.size
+    n_out = int(cat_n / samples_per_out)
     if n_out == 0:
+        _env_residual = cat
         return []
-    edges = np.linspace(0, n, n_out + 1).astype(int)
-    edges[-1] = n
-    return [float(np.max(abs_seg[e0:e1])) for e0, e1 in zip(edges[:-1], edges[1:])]
+    take_n = int(n_out * samples_per_out)
+    consumed = cat[:take_n]
+    _env_residual = cat[take_n:].copy()
+    edges = np.linspace(0, take_n, n_out + 1).astype(int)
+    edges[-1] = take_n
+    return [float(np.max(consumed[e0:e1])) for e0, e1 in zip(edges[:-1], edges[1:])]
 
 
 def _rebuild_buffers_for_state():
     """按当前 state 参数初始化 ring/deque 容量 (sample_rate/env_window_s 等变化后调用)"""
-    global _env_ring, _intensity_ring, _display_env_ring
+    global _env_ring, _intensity_ring, _display_env_ring, _env_residual
     env_cap = max(2, int(state.flash_env_rate_hz * state.flash_pre_ms / 1000) + 64)
     _env_ring = deque(maxlen=env_cap)
+    _env_residual = np.zeros(0, dtype=np.float32)
     int_cap = max(2, int(state.flash_baseline_ms / state.flash_window_ms) + 4)
     _intensity_ring = deque(maxlen=int_cap)
     disp_cap = max(50, int(state.env_window_s * state.env_rate_hz) + 20)
