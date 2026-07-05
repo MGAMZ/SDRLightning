@@ -805,13 +805,14 @@ def api_control():
             _stop_sdr_reader()
             _start_sdr_reader(
                 {"center_freq": state.center_freq, "sample_rate": state.sample_rate,
-                 "gain": None}, state.chunk,
+                 "gain": None, "ifgr": state.ifgr, "rfgr": state.rfgr},
+                state.chunk,
             )
     else:
         if _sdr_reader_proc is not None:
             # 多进程模式: 把配置通过 Pipe 推给 sdr_reader, 它直接调 SoapySDR
             for k, v in data.items():
-                if k in ("center_freq", "sample_rate", "gain"):
+                if k in ("center_freq", "sample_rate", "gain", "ifgr", "rfgr"):
                     _send_sdr_config(k, v)
             _running["ok"] = True
             _running["msg"] = "ok"
@@ -928,6 +929,8 @@ def main():
                     "center_freq": state.center_freq,
                     "sample_rate": state.sample_rate,
                     "gain": None,
+                    "ifgr": state.ifgr,
+                    "rfgr": state.rfgr,
                 },
                 state.chunk,
             )

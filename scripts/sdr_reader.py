@@ -12,6 +12,8 @@
 控制协议 (multiprocessing.Pipe, 单向 parent -> child):
 - {"type": "configure", "key": "center_freq", "value": Hz}
 - {"type": "configure", "key": "sample_rate", "value": Hz}  (重启 stream)
+- {"type": "configure", "key": "ifgr", "value": 20-59 (gain reduction dB)}
+- {"type": "configure", "key": "rfgr", "value": 0-3 (LNA state)}
 - {"type": "configure", "key": "gain", "value": dB}
 - {"type": "shutdown"}
 """
@@ -35,7 +37,8 @@ def _log(msg: str) -> None:
     print(f"[sdr_reader pid={os.getpid()}] {msg}", flush=True)
 
 
-def _open_sdr(center_freq: float, sample_rate: float, gain):
+def _open_sdr(center_freq: float, sample_rate: float, gain,
+              ifgr: int | None = None, rfgr: int | None = None):
     # enumerate() 返回完整 SoapySDRKwargs (driver, label, serial 等),
     # 直接 dict(driver=...) 缺少必要字段, SoapySDR 找不到 device
     devs = SoapySDR.Device.enumerate({"driver": "sdrplay"})
@@ -46,7 +49,13 @@ def _open_sdr(center_freq: float, sample_rate: float, gain):
     _log(f"SDR opened: {info}")
     sdr.setSampleRate(SOAPY_SDR_RX, 0, sample_rate)
     sdr.setFrequency(SOAPY_SDR_RX, 0, center_freq)
-    if gain is not None:
+    # 关 AGC (manual mode) 才能让 IFGR / RFGR 真的生效
+    sdr.setGainMode(SOAPY_SDR_RX, 0, False)
+    if ifgr is not None:
+        sdr.setGain(SOAPY_SDR_RX, 0, "IFGR", int(ifgr))
+    if rfgr is not None:
+        sdr.setGain(SOAPY_SDR_RX, 0, "RFGR", int(rfgr))
+    if gain is not None and ifgr is None and rfgr is None:
         sdr.setGain(SOAPY_SDR_RX, 0, gain)
     stream = sdr.setupStream(SOAPY_SDR_RX, "CF32")
     sdr.activateStream(stream)
@@ -66,6 +75,10 @@ def _configure(sdr, stream, key, value):
         sdr.activateStream(new_stream)
         _log(f"sample_rate -> {float(value)/1e6:.3f} MSPS, stream restarted")
         return new_stream
+    if key in ("ifgr", "rfgr"):
+        sdr.setGain(SOAPY_SDR_RX, 0, key.upper(), int(value))
+        _log(f"{key.upper()} -> {value}")
+        return stream
     if key == "gain":
         sdr.setGain(SOAPY_SDR_RX, 0, float(value))
         _log(f"gain -> {float(value)}")
@@ -104,6 +117,7 @@ def reader_main(ctrl, data_q, chunk_size: int = 1024):
     init = ctrl.recv()
     sdr, stream = _open_sdr(
         init["center_freq"], init["sample_rate"], init.get("gain"),
+        ifgr=init.get("ifgr"), rfgr=init.get("rfgr"),
     )
 
     mtu = sdr.getStreamMTU(stream)
