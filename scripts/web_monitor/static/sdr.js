@@ -8,7 +8,14 @@
 //   5. 包络只画 80 个点
 //   6. 频谱发送前在 server 端降到 256 bins
 
-const socket = io();
+const socket = io({
+    transports: ["websocket"],
+    upgrade: false,
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 5000,
+});
 
 // === 状态 ===
 let centerFreq = 50e6;
