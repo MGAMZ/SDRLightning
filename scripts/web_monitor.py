@@ -5,7 +5,7 @@ web_monitor.py
 单进程 Web 可视化 RSP1 雷电探测。
 
 启动 (任意平台, 假设已激活 conda env `sdr`):
-    python scripts/web_monitor.py --port 5000
+    python scripts/web_monitor.py --port 50000
 
 打开浏览器:
     http://localhost:5000
@@ -867,7 +867,10 @@ def run_bench(args):
     print(f"  samples: {samples} ({samples/dt_total:.0f}/s, "
           f"{samples/dt_total/1e6:.3f} MSPS effective)")
     print(f"  FFTs: {BENCH['ffts']} ({BENCH['ffts']/dt_total:.0f}/s)")
-    print(f"  emits: {BENCH['emits']} ({BENCH['emits']/dt_total:.2f}/s)")
+    print(f"  emits: {BENCH['emits']} ({BENCH['emits']/dt_total:.2f}/s, "
+          f"throttle cap = 15.15/s)")
+    print(f"  max_iters_between_emits: {BENCH.get('max_iters_between', 'n/a')}")
+    print(f"  max_wall_between_emits (s): {BENCH.get('max_wall_between', 0):.4f}")
     print(f"  reads_zero: {BENCH['reads_zero']}")
     if iters:
         t_total = BENCH["t_total"]
@@ -930,8 +933,10 @@ def _bench_loop(no_fft, no_emit, no_flash, no_iq, duration):
         "t_readStream": 0.0, "t_env": 0.0, "t_flash": 0.0,
         "t_fft": 0.0, "t_emit": 0.0, "t_iq": 0.0, "t_total": 0.0,
         "iters": 0, "samples": 0, "ffts": 0, "emits": 0, "reads_zero": 0,
+        "emits_would": 0,  # theoretical max at 15 fps
         "t_last": time.perf_counter(),
         "t_start": time.perf_counter(),
+        "t_last_frame": 0.0,
     }
     t_end = BENCH["t_start"] + duration
     fft_buf = np.zeros(state.fft_size, dtype=np.complex64)
@@ -1032,11 +1037,20 @@ def _bench_loop(no_fft, no_emit, no_flash, no_iq, duration):
         # frame emit (simulate; without a connected socketio client this is a no-op but still time the call)
         t_emit_start = time.perf_counter()
         if not no_emit:
-            # 模拟 emit 调用, 不真正发包
-            t_last_frame = BENCH.get("t_last_frame", 0.0)
-            t_now_wall = time.time()
-            if t_now_wall - t_last_frame >= 0.066 and _waterfall:
-                BENCH["t_last_frame"] = t_now_wall
+            t_now = time.perf_counter()
+            if t_now - BENCH["t_last_frame"] >= 0.066 and _waterfall:
+                # 记录两次 emit 之间的 iters 和时间
+                iters_between = BENCH["iters"] - BENCH.get("iters_at_last_emit", 0)
+                wall_between = t_now - BENCH.get("t_at_last_emit", BENCH["t_start"])
+                BENCH.setdefault("max_iters_between", 0)
+                BENCH.setdefault("max_wall_between", 0.0)
+                if iters_between > BENCH["max_iters_between"]:
+                    BENCH["max_iters_between"] = iters_between
+                if wall_between > BENCH["max_wall_between"]:
+                    BENCH["max_wall_between"] = wall_between
+                BENCH["iters_at_last_emit"] = BENCH["iters"]
+                BENCH["t_at_last_emit"] = t_now
+                BENCH["t_last_frame"] = t_now
                 BENCH["emits"] += 1
         BENCH["t_emit"] += time.perf_counter() - t_emit_start
 
@@ -1045,21 +1059,6 @@ def _bench_loop(no_fft, no_emit, no_flash, no_iq, duration):
         BENCH["t_total"] += time.perf_counter() - t_iter
 
         _bench_print_stats(BENCH)
-
-    print(f"[+] Web 服务: http://{args.host}:{args.port}")
-    try:
-        socketio.run(
-            app,
-            host=args.host,
-            port=args.port,
-            debug=False,
-            allow_unsafe_werkzeug=True,  # 单进程 dev 用
-        )
-    finally:
-        _stop_event.set()
-        with _stream_lock, _sdr_lock:
-            close_sdr_unlocked()
-        print("[+] 退出")
 
 
 if __name__ == "__main__":
