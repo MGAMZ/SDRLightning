@@ -834,7 +834,8 @@ def run_bench(args):
         print(f"[bench] SDR 打开失败: {e}")
         return
 
-    # 重置全局 bench 计数 + 打开 reader_loop 内部计时
+# 重置全局 bench 计数 + 打开 reader_loop 内部计时
+    global BENCH, _BENCH_LAST
     BENCH = {
         "t_readStream": 0.0,
         "t_env": 0.0,
@@ -848,15 +849,21 @@ def run_bench(args):
         "ffts": 0,
         "emits": 0,
         "reads_zero": 0,
-        "t_last": time.perf_counter(),
-        "t_start": time.perf_counter(),
+        "iters_at_last_emit": 0,
+        "t_at_last_emit": 0.0,
+        "max_iters_between": 0,
+        "max_wall_between": 0.0,
+        "t_last_frame": 0.0,
+        "t_start": 0.0,
     }
+    for k in _BENCH_LAST:
+        _BENCH_LAST[k] = 0
     print(f"[bench] running for {args.bench_duration:.0f}s ...")
 
     # 跑 reader_loop 的镜像 (带计时)
     _bench_loop(no_fft, no_emit, no_flash, no_iq, args.bench_duration)
 
-    # 汇总
+    # 汇总 (BENCH 现在是累计值, _BENCH_LAST 在最近一次 print 时被更新)
     dt_total = time.perf_counter() - BENCH["t_start"]
     iters = BENCH["iters"]
     samples = BENCH["samples"]
@@ -869,8 +876,15 @@ def run_bench(args):
     print(f"  FFTs: {BENCH['ffts']} ({BENCH['ffts']/dt_total:.0f}/s)")
     print(f"  emits: {BENCH['emits']} ({BENCH['emits']/dt_total:.2f}/s, "
           f"throttle cap = 15.15/s)")
-    print(f"  max_iters_between_emits: {BENCH.get('max_iters_between', 'n/a')}")
-    print(f"  max_wall_between_emits (s): {BENCH.get('max_wall_between', 0):.4f}")
+    if BENCH['emits'] > 0:
+        avg_iters_per_emit = BENCH['iters'] / BENCH['emits']
+        avg_wall_per_emit = dt_total / BENCH['emits']
+        print(f"  avg_iters_per_emit: {avg_iters_per_emit:.1f}")
+        print(f"  avg_wall_per_emit: {avg_wall_per_emit*1000:.1f}ms "
+              f"(throttle gap = 66ms)")
+    print(f"  max_iters_between_emits: {BENCH.get('max_iters_between', 0)}")
+    print(f"  max_wall_between_emits (s): "
+          f"{BENCH.get('max_wall_between', 0):.4f}")
     print(f"  reads_zero: {BENCH['reads_zero']}")
     if iters:
         t_total = BENCH["t_total"]
@@ -889,55 +903,66 @@ def run_bench(args):
         close_sdr_unlocked()
 
 
+_BENCH_LAST = {"t": 0.0, "iters": 0, "samples": 0, "ffts": 0,
+                "emits": 0, "reads_zero": 0,
+                "t_readStream": 0.0, "t_env": 0.0, "t_flash": 0.0,
+                "t_fft": 0.0, "t_emit": 0.0, "t_iq": 0.0, "t_total": 0.0}
+
+
 def _bench_print_stats(BENCH, force=False):
     now = time.perf_counter()
-    if not force and now - BENCH["t_last"] < 1.0:
+    if not force and now - _BENCH_LAST["t"] < 1.0:
         return
-    dt = now - BENCH["t_last"]
+    dt = now - _BENCH_LAST["t"]
     if dt <= 0:
         return
-    iters = BENCH["iters"]
-    samples = BENCH["samples"]
+    d_iters = BENCH["iters"] - _BENCH_LAST["iters"]
+    d_samples = BENCH["samples"] - _BENCH_LAST["samples"]
+    d_ffts = BENCH["ffts"] - _BENCH_LAST["ffts"]
+    d_emits = BENCH["emits"] - _BENCH_LAST["emits"]
+    d_reads0 = BENCH["reads_zero"] - _BENCH_LAST["reads_zero"]
+    d_t = {k: BENCH[k] - _BENCH_LAST[k] for k in
+           ["t_readStream", "t_env", "t_flash", "t_fft", "t_emit", "t_iq", "t_total"]}
     print(f"\n[bench +{now - BENCH['t_start']:5.1f}s] "
-          f"iters={iters/dt:5.0f}/s samples={samples/dt/1e3:7.1f}kS/s "
-          f"FFTs={BENCH['ffts']/dt:4.0f}/s emits={BENCH['emits']/dt:5.2f}/s "
-          f"reads0={BENCH['reads_zero']}")
-    if iters:
-        t_total = BENCH["t_total"]
-        print(f"          per-iter {t_total/iters*1000:5.2f}ms | "
-              f"read={BENCH['t_readStream']/iters*1000:5.2f} "
-              f"env={BENCH['t_env']/iters*1000:4.2f} "
-              f"flash={BENCH['t_flash']/iters*1000:4.2f} "
-              f"fft={BENCH['t_fft']/iters*1000:5.2f} "
-              f"emit={BENCH['t_emit']/iters*1000:4.2f} "
-              f"iq={BENCH['t_iq']/iters*1000:4.2f}")
-    BENCH["t_readStream"] = 0.0
-    BENCH["t_env"] = 0.0
-    BENCH["t_flash"] = 0.0
-    BENCH["t_fft"] = 0.0
-    BENCH["t_emit"] = 0.0
-    BENCH["t_iq"] = 0.0
-    BENCH["t_total"] = 0.0
-    BENCH["iters"] = 0
-    BENCH["samples"] = 0
-    BENCH["ffts"] = 0
-    BENCH["emits"] = 0
-    BENCH["reads_zero"] = 0
-    BENCH["t_last"] = now
+          f"iters={d_iters/dt:5.0f}/s samples={d_samples/dt/1e3:7.1f}kS/s "
+          f"({d_samples/dt/1e6:.3f} MSPS effective) "
+          f"FFTs={d_ffts/dt:4.0f}/s emits={d_emits/dt:5.2f}/s "
+          f"reads0={d_reads0}")
+    if d_iters:
+        per_iter_t = d_t["t_total"] / d_iters * 1000
+        print(f"          per-iter {per_iter_t:5.2f}ms | "
+              f"read={d_t['t_readStream']/d_iters*1000:5.2f} "
+              f"env={d_t['t_env']/d_iters*1000:4.2f} "
+              f"flash={d_t['t_flash']/d_iters*1000:4.2f} "
+              f"fft={d_t['t_fft']/d_iters*1000:5.2f} "
+              f"emit={d_t['t_emit']/d_iters*1000:4.2f} "
+              f"iq={d_t['t_iq']/d_iters*1000:4.2f}")
+    _BENCH_LAST["t"] = now
+    _BENCH_LAST["iters"] = BENCH["iters"]
+    _BENCH_LAST["samples"] = BENCH["samples"]
+    _BENCH_LAST["ffts"] = BENCH["ffts"]
+    _BENCH_LAST["emits"] = BENCH["emits"]
+    _BENCH_LAST["reads_zero"] = BENCH["reads_zero"]
+    for k in ["t_readStream", "t_env", "t_flash", "t_fft", "t_emit", "t_iq", "t_total"]:
+        _BENCH_LAST[k] = BENCH[k]
 
 
 def _bench_loop(no_fft, no_emit, no_flash, no_iq, duration):
     """reader_loop 的镜像, 每阶段 perf_counter 计时."""
     global BENCH
-    BENCH = {
+    BENCH.clear()
+    BENCH.update({
         "t_readStream": 0.0, "t_env": 0.0, "t_flash": 0.0,
         "t_fft": 0.0, "t_emit": 0.0, "t_iq": 0.0, "t_total": 0.0,
         "iters": 0, "samples": 0, "ffts": 0, "emits": 0, "reads_zero": 0,
-        "emits_would": 0,  # theoretical max at 15 fps
+        "iters_at_last_emit": 0,
+        "t_at_last_emit": 0.0,
+        "max_iters_between": 0,
+        "max_wall_between": 0.0,
+        "t_last_frame": 0.0,
         "t_last": time.perf_counter(),
         "t_start": time.perf_counter(),
-        "t_last_frame": 0.0,
-    }
+    })
     t_end = BENCH["t_start"] + duration
     fft_buf = np.zeros(state.fft_size, dtype=np.complex64)
     fft_n = 0
