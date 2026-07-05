@@ -95,13 +95,13 @@ VLF 段一般用 0 或 1。FM/广播段建议 2 或 3 防过载。">?</span>
       <label><span>窗长 T<sub>w</sub> (ms)</span>
         <span class="tip" data-tip="一次强度积分的窗口长度。每 T_w 算一次窗内平均功率 I_k，拿它跟 baseline 比。典型闪电一次放电 200-500 ms，所以窗长 100-300 ms 比较合适。">?</span>
       </label>
-      <input type="number" id="ctl-window-ms" value="200" step="50" min="50" max="500">
+      <input type="number" id="ctl-window-ms" value="100" step="50" min="50" max="500">
     </div>
     <div class="control-group">
-      <label><span>Baseline 时长 T<sub>b</sub> (s)</span>
-        <span class="tip" data-tip="回看多少秒的窗强度来算 baseline。1 s 灵敏但易误触；5 s 稳但漏连续雷暴。3 s 是常用折中。">?</span>
+      <label><span>Baseline 时长 T<sub>b</sub> (ms)</span>
+        <span class="tip" data-tip="回看多少毫秒的窗强度来算 baseline。500 ms 灵敏但易误触；3000 ms 稳但漏连续雷暴。1000 ms 是常用折中。">?</span>
       </label>
-      <input type="number" id="ctl-baseline-s" value="3" step="0.5" min="1" max="10">
+      <input type="number" id="ctl-baseline-ms" value="1000" step="100" min="200" max="10000">
     </div>
     <div class="control-group">
       <label><span>触发阈值 Δ (dB)</span>
@@ -122,10 +122,10 @@ VLF 段一般用 0 或 1。FM/广播段建议 2 或 3 防过载。">?</span>
       <input type="number" id="ctl-post-ms" value="700" step="100" min="100" max="2000">
     </div>
     <div class="control-group">
-      <label><span>冷却 T<sub>cd</sub> (s)</span>
+      <label><span>冷却 T<sub>cd</sub> (ms)</span>
         <span class="tip" data-tip="一次触发后多久内不再触发，抑制同一 flash 被重复计为多次。">?</span>
       </label>
-      <input type="number" id="ctl-cooldown" value="1.0" step="0.1" min="0.2" max="5">
+      <input type="number" id="ctl-cooldown-ms" value="1000" step="100" min="200" max="10000">
     </div>
     <div class="control-group" style="margin-top:10px">
       <small style="color:#888">I_k = 窗内 \|IQ\|² 均值（窄带功率），baseline = 过去 T_b 内 I_k 的均值，触发 = I_k − baseline &gt; Δ。</small>

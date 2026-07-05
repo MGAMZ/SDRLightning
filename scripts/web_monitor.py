@@ -75,12 +75,12 @@ class SDRState:
         self.fft_size = 1024
         self.chunk = 1024
         # flash 检测参数 (见 reader_loop 注释 / AGENTS.md 定义)
-        self.flash_window_ms = 200       # T_w: 一次强度积分的窗长
-        self.flash_baseline_s = 3.0      # T_b: baseline 回看时长
+        self.flash_window_ms = 100       # T_w: 一次强度积分的窗长
+        self.flash_baseline_ms = 1000    # T_b: baseline 回看时长 (ms)
         self.flash_thresh_db = 12.0      # Δ: 当前窗超 baseline 多少 dB 触发
         self.flash_pre_ms = 500          # T_pre: 触发前保存的 IQ/包络长度
         self.flash_post_ms = 700         # T_post: 触发后继续保存的长度
-        self.flash_cooldown_s = 1.0      # T_cd: 抑制同 flash 重复触发
+        self.flash_cooldown_ms = 1000    # T_cd: 抑制同 flash 重复触发 (ms)
         self.flash_env_rate_hz = 1000    # f_env: flash 包络降采样率
         # 实时包络可视化参数 (跟 flash 检测分离, 用于浏览器 UI)
         self.env_window_s = 10.0         # 实时包络图显示多长时间历史
@@ -98,11 +98,11 @@ class SDRState:
                 "fft_size": self.fft_size,
                 "chunk": self.chunk,
                 "flash_window_ms": self.flash_window_ms,
-                "flash_baseline_s": self.flash_baseline_s,
+                "flash_baseline_ms": self.flash_baseline_ms,
                 "flash_thresh_db": self.flash_thresh_db,
                 "flash_pre_ms": self.flash_pre_ms,
                 "flash_post_ms": self.flash_post_ms,
-                "flash_cooldown_s": self.flash_cooldown_s,
+                "flash_cooldown_ms": self.flash_cooldown_ms,
                 "flash_env_rate_hz": self.flash_env_rate_hz,
                 "env_window_s": self.env_window_s,
                 "env_rate_hz": self.env_rate_hz,
@@ -316,7 +316,7 @@ def _rebuild_buffers_for_state():
     global _env_ring, _intensity_ring, _display_env_ring
     env_cap = max(2, int(state.flash_env_rate_hz * state.flash_pre_ms / 1000) + 64)
     _env_ring = deque(maxlen=env_cap)
-    int_cap = max(2, int(state.flash_baseline_s * 1000 / state.flash_window_ms) + 4)
+    int_cap = max(2, int(state.flash_baseline_ms / state.flash_window_ms) + 4)
     _intensity_ring = deque(maxlen=int_cap)
     disp_cap = max(50, int(state.env_window_s * state.env_rate_hz) + 20)
     _display_env_ring = deque(maxlen=disp_cap)
@@ -541,7 +541,7 @@ def reader_loop():
             baseline_db = float(np.mean(_intensity_ring)) if _intensity_ring else -100.0
             excess_db = i_k_db - baseline_db
 
-            in_cd = (t_now - last_trigger_t) < state.flash_cooldown_s
+            in_cd = (t_now - last_trigger_t) * 1000 < state.flash_cooldown_ms
             if (not in_cd) and excess_db > state.flash_thresh_db:
                 last_trigger_t = t_now
                 _flash_count += 1
@@ -650,8 +650,8 @@ def api_control():
                 state.bandwidth = float(v)
             elif k in ("ifgr", "rfgr"):
                 setattr(state, k, int(v))
-            elif k in ("flash_window_ms", "flash_baseline_s", "flash_pre_ms",
-                       "flash_post_ms", "flash_cooldown_s"):
+            elif k in ("flash_window_ms", "flash_baseline_ms", "flash_pre_ms",
+                       "flash_post_ms", "flash_cooldown_ms"):
                 setattr(state, k, float(v))
             elif k == "flash_thresh_db":
                 state.flash_thresh_db = float(v)

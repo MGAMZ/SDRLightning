@@ -728,11 +728,11 @@ socket.on("state", (s) => {
     $("val-rfgr").textContent = s.rfgr;
     $("ctl-env-window-s").value = s.env_window_s;
     $("ctl-window-ms").value = s.flash_window_ms;
-    $("ctl-baseline-s").value = s.flash_baseline_s;
+    $("ctl-baseline-ms").value = s.flash_baseline_ms;
     $("ctl-thresh").value = s.flash_thresh_db;
     $("ctl-pre-ms").value = s.flash_pre_ms;
     $("ctl-post-ms").value = s.flash_post_ms;
-    $("ctl-cooldown").value = s.flash_cooldown_s;
+    $("ctl-cooldown-ms").value = s.flash_cooldown_ms;
     $("sample-rate").textContent = `SR: ${(s.sample_rate/1e6).toFixed(2)} MSPS`;
 });
 
@@ -760,11 +760,11 @@ function applyControls() {
         rfgr: parseInt($("ctl-rfgr").value),
         env_window_s: parseFloat($("ctl-env-window-s").value),
         flash_window_ms: parseFloat($("ctl-window-ms").value),
-        flash_baseline_s: parseFloat($("ctl-baseline-s").value),
+        flash_baseline_ms: parseFloat($("ctl-baseline-ms").value),
         flash_thresh_db: parseFloat($("ctl-thresh").value),
         flash_pre_ms: parseFloat($("ctl-pre-ms").value),
         flash_post_ms: parseFloat($("ctl-post-ms").value),
-        flash_cooldown_s: parseFloat($("ctl-cooldown").value),
+        flash_cooldown_ms: parseFloat($("ctl-cooldown-ms").value),
     };
     msg.textContent = "应用…";
     msg.className = "hint";
@@ -841,10 +841,10 @@ fetch("/api/state").then(r => r.json()).then(s => {
     $("val-rfgr").textContent = s.rfgr;
     $("ctl-env-window-s").value = s.env_window_s;
     $("ctl-window-ms").value = s.flash_window_ms;
-    $("ctl-baseline-s").value = s.flash_baseline_s;
+    $("ctl-baseline-ms").value = s.flash_baseline_ms;
     $("ctl-thresh").value = s.flash_thresh_db;
     $("ctl-pre-ms").value = s.flash_pre_ms;
     $("ctl-post-ms").value = s.flash_post_ms;
-    $("ctl-cooldown").value = s.flash_cooldown_s;
+    $("ctl-cooldown-ms").value = s.flash_cooldown_ms;
     $("sample-rate").textContent = `SR: ${(s.sample_rate/1e6).toFixed(2)} MSPS`;
 });

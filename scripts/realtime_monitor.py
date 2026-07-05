@@ -89,12 +89,12 @@ def main():
                         help="每隔多少秒打印一帧 [SPEC]")
     parser.add_argument("--flash-window-ms", type=float, default=200.0,
                         help="窗长 T_w: 一次强度积分的时间 (ms)")
-    parser.add_argument("--flash-baseline-s", type=float, default=3.0,
-                        help="baseline 回看时长 T_b (s)")
+    parser.add_argument("--flash-baseline-ms", type=float, default=1000.0,
+                        help="baseline 回看时长 T_b (ms)")
     parser.add_argument("--flash-thresh-db", type=float, default=12.0,
                         help="窗功率超 baseline 多少 dB 触发")
-    parser.add_argument("--flash-cooldown-s", type=float, default=1.0,
-                        help="两次 flash 之间冷却 (s)")
+    parser.add_argument("--flash-cooldown-ms", type=float, default=1000.0,
+                        help="两次 flash 之间冷却 (ms)")
     parser.add_argument("--duration", type=float, default=0,
                         help="运行时长 (0=无限)")
     parser.add_argument("--plot", action="store_true",
@@ -121,7 +121,7 @@ def main():
     fft_buf = np.zeros(args.fft_size, dtype=np.complex64)
     fft_n = 0
     env_window = deque(maxlen=400)
-    intensity_ring = deque(maxlen=max(2, int(args.flash_baseline_s * 1000 / args.flash_window_ms) + 4))
+    intensity_ring = deque(maxlen=max(2, int(args.flash_baseline_ms / args.flash_window_ms) + 4))
     win_target_n = max(1, int(args.sample_rate * args.flash_window_ms / 1000))
     win_acc_power = 0.0
     win_acc_n = 0
@@ -158,7 +158,7 @@ def main():
                 baseline_db = float(np.mean(intensity_ring)) if intensity_ring else -100.0
                 excess_db = i_k_db - baseline_db
 
-                in_cd = (t_now - last_trigger_t) < args.flash_cooldown_s
+                in_cd = (t_now - last_trigger_t) * 1000 < args.flash_cooldown_ms
                 if (not in_cd) and excess_db > args.flash_thresh_db:
                     last_trigger_t = t_now
                     flash_count += 1
