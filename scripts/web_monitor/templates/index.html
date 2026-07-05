@@ -86,6 +86,12 @@ VLF 段一般用 0 或 1。FM/广播段建议 2 或 3 防过载。">?</span>
       <input type="range" id="ctl-rfgr" min="0" max="3" step="1" value="1">
     </div>
     <div class="control-group">
+      <label><span>包络图时间窗 (s)</span>
+        <span class="tip" data-tip="实时包络图显示多长时间历史 (横轴长度)。窗口越大曲线越平滑，但短期变化越难看清。10 s 是常用折中。">?</span>
+      </label>
+      <input type="number" id="ctl-env-window-s" value="10" step="1" min="1" max="60">
+    </div>
+    <div class="control-group">
       <label><span>窗长 T<sub>w</sub> (ms)</span>
         <span class="tip" data-tip="一次强度积分的窗口长度。每 T_w 算一次窗内平均功率 I_k，拿它跟 baseline 比。典型闪电一次放电 200-500 ms，所以窗长 100-300 ms 比较合适。">?</span>
       </label>

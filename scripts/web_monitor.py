@@ -81,7 +81,10 @@ class SDRState:
         self.flash_pre_ms = 500          # T_pre: 触发前保存的 IQ/包络长度
         self.flash_post_ms = 700         # T_post: 触发后继续保存的长度
         self.flash_cooldown_s = 1.0      # T_cd: 抑制同 flash 重复触发
-        self.flash_env_rate_hz = 1000    # f_env: 包络降采样率
+        self.flash_env_rate_hz = 1000    # f_env: flash 包络降采样率
+        # 实时包络可视化参数 (跟 flash 检测分离, 用于浏览器 UI)
+        self.env_window_s = 10.0         # 实时包络图显示多长时间历史
+        self.env_rate_hz = 100           # 实时包络的降采样率
         self.lock = threading.Lock()
 
     def to_dict(self):
@@ -101,6 +104,8 @@ class SDRState:
                 "flash_post_ms": self.flash_post_ms,
                 "flash_cooldown_s": self.flash_cooldown_s,
                 "flash_env_rate_hz": self.flash_env_rate_hz,
+                "env_window_s": self.env_window_s,
+                "env_rate_hz": self.env_rate_hz,
             }
 
 
@@ -141,6 +146,22 @@ def _resize_iq_buffer(new_cap):
 # 包络降采样环 (T_pre × f_env 点) 和窗强度环 (T_b / T_w 点)
 _env_ring = deque(maxlen=1)
 _intensity_ring = deque(maxlen=1)
+
+# 实时显示用的包络环 (固定 env_rate_hz, 容量 = env_window_s × env_rate_hz)
+_display_env_ring = deque(maxlen=1)
+_display_env_acc = 0.0
+_display_env_acc_n = 0
+_display_env_last_t = 0.0
+
+# 有效采样率估计 (1 秒滑动窗口, EMA 平滑)
+_eff_rate = 0.0
+_eff_rate_acc_samples = 0
+_eff_rate_last_t = 0.0
+
+def _current_eff_rate():
+    """实际从 readStream 拿到的 sample/s, 用于时间→样本换算.
+    前 1 秒还没收敛时退回 state.sample_rate."""
+    return _eff_rate if _eff_rate > 0 else state.sample_rate
 
 # flash 详情缓存: id -> dict (envelope_trace, spectrum, iq_peak_slice 等)
 _flash_details = {}
@@ -291,12 +312,14 @@ def _downsample_envelope_chunk(seg: np.ndarray, samples_per_out: float) -> list:
 
 
 def _rebuild_buffers_for_state():
-    """按当前 state 参数初始化 ring/deque 容量 (sample_rate 等变化后调用)"""
-    global _env_ring, _intensity_ring
+    """按当前 state 参数初始化 ring/deque 容量 (sample_rate/env_window_s 等变化后调用)"""
+    global _env_ring, _intensity_ring, _display_env_ring
     env_cap = max(2, int(state.flash_env_rate_hz * state.flash_pre_ms / 1000) + 64)
     _env_ring = deque(maxlen=env_cap)
     int_cap = max(2, int(state.flash_baseline_s * 1000 / state.flash_window_ms) + 4)
     _intensity_ring = deque(maxlen=int_cap)
+    disp_cap = max(50, int(state.env_window_s * state.env_rate_hz) + 20)
+    _display_env_ring = deque(maxlen=disp_cap)
     iq_cap = max(1, int(state.sample_rate * state.flash_pre_ms / 1000))
     _resize_iq_buffer(iq_cap)
 
@@ -307,8 +330,9 @@ def _finalize_flash(post_capture: dict):
     pre_env = ev["pre_env"]
     post_env = post_capture["post_env"]
     env_rate = ev["env_rate_hz"]
-    sample_rate = ev["sample_rate_hz"]
+    sample_rate = ev["sample_rate_hz"]   # 声明值, 写在 payload 里给 UI 展示
     pre_ms = ev["pre_ms"]
+    sr_eff = _current_eff_rate()         # 实际值, 用来定位 IQ 样本
 
     envelope_trace = np.array(pre_env + post_env, dtype=np.float32)
     pre_iq = snapshot_iq_ring()
@@ -317,34 +341,34 @@ def _finalize_flash(post_capture: dict):
     else:
         post_iq = np.zeros(0, dtype=np.complex64)
 
-    # peak index in envelope, 换算到 captured IQ 里的 sample 位置
+    # peak index in envelope, 换算到 captured IQ 里的 sample 位置 (用有效采样率)
     if envelope_trace.size > 0:
         peak_idx = int(np.argmax(envelope_trace))
         peak_t_s = peak_idx / env_rate
     else:
         peak_idx = 0
         peak_t_s = 0.0
-    pre_n_samples = int(pre_ms / 1000.0 * sample_rate)
-    peak_iq_in_captured = int(round(peak_t_s * sample_rate))
+    pre_n_samples = int(pre_ms / 1000.0 * sr_eff)
+    peak_iq_in_captured = int(round(peak_t_s * sr_eff))
 
     # IQ peak slice (±25ms 围绕 peak)
-    half_n = max(1, int(0.025 * sample_rate))
+    half_n = max(1, int(0.025 * sr_eff))
     lo = max(0, peak_iq_in_captured - half_n)
     hi = peak_iq_in_captured + half_n
-    captured_total = pre_n_samples + post_iq.size
+    captured_total = pre_iq.size + post_iq.size
     hi = min(captured_total, hi)
     if lo >= captured_total:
         peak_iq = np.zeros(0, dtype=np.complex64)
-    elif lo < pre_n_samples:
-        pre_part_n = pre_n_samples - lo
+    elif lo < pre_iq.size:
+        pre_part_n = pre_iq.size - lo
         pre_part = pre_iq[-pre_part_n:] if pre_part_n > 0 else np.zeros(0, dtype=np.complex64)
-        post_part_n = max(0, hi - pre_n_samples)
+        post_part_n = max(0, hi - pre_iq.size)
         post_part = post_iq[:post_part_n] if post_part_n > 0 else np.zeros(0, dtype=np.complex64)
         peak_iq = np.concatenate([pre_part, post_part]) if pre_part.size + post_part.size > 0 \
                   else np.zeros(0, dtype=np.complex64)
     else:
-        s = lo - pre_n_samples
-        e = hi - pre_n_samples
+        s = lo - pre_iq.size
+        e = hi - pre_iq.size
         peak_iq = post_iq[s:e]
 
     # 平均频谱 (用 fft_size 窗口扫一遍 captured IQ, 求平均 |FFT|^2 后转 dB)
@@ -385,7 +409,7 @@ def _finalize_flash(post_capture: dict):
         "envelope_rate_hz": env_rate,
         "duration_s": round(envelope_trace.size / env_rate, 3) if env_rate > 0 else 0,
         "freq_center_hz": ev["freq_center_hz"],
-        "sample_rate_hz": ev["sample_rate_hz"],
+        "sample_rate_hz": sample_rate,
         "spectrum": spec_ds.tolist(),
         "peak_idx": peak_idx,
         "peak_t_ms": round(peak_t_s * 1000, 1),
@@ -401,7 +425,7 @@ def _finalize_flash(post_capture: dict):
 
     _flash_details[out["id"]] = {
         "iq_peak_slice": peak_iq.tolist(),
-        "iq_sample_rate_hz": sample_rate,
+        "iq_sample_rate_hz": sr_eff,
         "peak_idx": peak_idx,
         "peak_t_ms": out["peak_t_ms"],
     }
@@ -412,6 +436,8 @@ def _finalize_flash(post_capture: dict):
 
 def reader_loop():
     global _total_samples, _flash_count, _t_start
+    global _eff_rate, _eff_rate_acc_samples, _eff_rate_last_t
+    global _display_env_acc, _display_env_acc_n, _display_env_last_t
 
     fft_buf = np.zeros(state.fft_size, dtype=np.complex64)
     fft_n = 0
@@ -423,9 +449,16 @@ def reader_loop():
 
     win_acc_power = 0.0
     win_acc_n = 0
+    # 窗目标用 _current_eff_rate() (在循环里更新), 首次先按声明速率占位
     win_target_n = max(1, int(state.sample_rate * state.flash_window_ms / 1000))
 
     post_capture = None
+    _eff_rate = 0.0
+    _eff_rate_acc_samples = 0
+    _eff_rate_last_t = 0.0
+    _display_env_acc = 0.0
+    _display_env_acc_n = 0
+    _display_env_last_t = 0.0
 
     _rebuild_buffers_for_state()
 
@@ -454,17 +487,45 @@ def reader_loop():
         _total_samples += ret.ret
         push_iq_ring(seg)
 
-        # 峰值 / 包络（给 UI 用）
+        # 峰值 (给溢出检测用)
         peak_now = float(np.max(np.abs(seg)))
         peak_ema = peak_ema * 0.97 + peak_now * 0.03
-        env_now = float(np.mean(np.abs(seg)))
-        _envelope.append(env_now)
 
+        # === 有效采样率估计 (每 1s 一次 EMA) ===
+        _eff_rate_acc_samples += ret.ret
         t_now = time.time()
+        if _eff_rate_last_t == 0.0:
+            _eff_rate_last_t = t_now
+        elif t_now - _eff_rate_last_t >= 1.0:
+            inst = _eff_rate_acc_samples / (t_now - _eff_rate_last_t)
+            if _eff_rate == 0.0:
+                _eff_rate = inst
+            else:
+                _eff_rate = _eff_rate * 0.7 + inst * 0.3
+            _eff_rate_acc_samples = 0
+            _eff_rate_last_t = t_now
+            # 更新窗目标
+            win_target_n = max(1, int(_eff_rate * state.flash_window_ms / 1000))
 
-        # 包络降采样进 env_ring (max-pool)
+        # === 实时显示用包络 (固定 100 Hz, 墙钟触发, 跟 SDR 采样率解耦) ===
+        env_now = float(np.mean(np.abs(seg)))
+        _display_env_acc += env_now
+        _display_env_acc_n += 1
+        if _display_env_last_t == 0.0:
+            _display_env_last_t = t_now
+        else:
+            disp_period = 1.0 / max(1, state.env_rate_hz)
+            if t_now - _display_env_last_t >= disp_period:
+                if _display_env_acc_n > 0:
+                    _display_env_ring.append(_display_env_acc / _display_env_acc_n)
+                _display_env_acc = 0.0
+                _display_env_acc_n = 0
+                _display_env_last_t = t_now
+
+        # 包络降采样进 flash 的 env_ring (max-pool)
         env_rate = state.flash_env_rate_hz
-        spr = max(1.0, state.sample_rate / env_rate)
+        sr_eff = _current_eff_rate()
+        spr = max(1.0, sr_eff / env_rate)
         n_seg = len(seg)
         env_samples = _downsample_envelope_chunk(seg, spr)
         if env_samples:
@@ -500,7 +561,7 @@ def reader_loop():
                 }
                 post_capture = {
                     "ev": ev,
-                    "remaining_samples": int(state.sample_rate * state.flash_post_ms / 1000),
+                    "remaining_samples": int(sr_eff * state.flash_post_ms / 1000),
                     "post_env": [],
                     "post_iq_chunks": [],
                 }
@@ -538,8 +599,9 @@ def reader_loop():
         # 推送到浏览器 (15 fps)
         if t_now - t_last_frame >= FRAME_INTERVAL_S and _waterfall:
             t_last_frame = t_now
-            env_hist = list(_envelope)[-80:]
-            env_db_mean = 20 * np.log10(np.mean(env_hist) + 1e-12) if env_hist else -100.0
+            disp_n = int(state.env_window_s * state.env_rate_hz)
+            env_disp = list(_display_env_ring)[-disp_n:]
+            env_db_mean = 20 * np.log10(np.mean(env_disp) + 1e-12) if env_disp else -100.0
             spec_line = _waterfall[-1]
             overflow = peak_ema > OVERFLOW_THRESHOLD
             socketio.emit(
@@ -548,7 +610,8 @@ def reader_loop():
                     "t": round(t_now - _t_start, 2),
                     "samples": _total_samples,
                     "spectrum": spec_line.tolist(),
-                    "envelope": env_hist,
+                    "envelope": env_disp,
+                    "envelope_rate_hz": state.env_rate_hz,
                     "envelope_db_mean": env_db_mean,
                     "flash_count": _flash_count,
                     "peak_ema": round(peak_ema, 3),
@@ -594,6 +657,12 @@ def api_control():
                 state.flash_thresh_db = float(v)
             elif k == "flash_env_rate_hz":
                 state.flash_env_rate_hz = max(50.0, float(v))
+            elif k == "env_window_s":
+                state.env_window_s = max(1.0, min(60.0, float(v)))
+                _rebuild_buffers_for_state()
+            elif k == "env_rate_hz":
+                state.env_rate_hz = max(20.0, min(1000.0, float(v)))
+                _rebuild_buffers_for_state()
             elif k == "sample_rate" and float(v) != state.sample_rate:
                 state.sample_rate = float(v)
                 restart_needed = True

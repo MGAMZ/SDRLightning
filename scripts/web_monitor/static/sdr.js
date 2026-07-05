@@ -148,6 +148,7 @@ setInterval(() => { resizeAll(); }, 2000);
 let pendingFrame = null;
 let pendingFlashes = [];
 let envHistory = [];
+let envRate = 100;
 let envMeanDb = -100;
 let flashCount = 0;
 let lastSpec = null;
@@ -261,15 +262,16 @@ function renderEnvelope() {
         if (v < eMin) eMin = v;
         if (v > eMax) eMax = v;
     }
-    const pad = (eMax - eMin) * 0.1 || 0.01;
+    const pad = (eMax - eMin) * 0.1 || 0.001;
     const lo = Math.max(0, eMin - pad);
     const hi = eMax + pad;
 
     envCtx.strokeStyle = "#dd3355";
     envCtx.lineWidth = 1.2;
     envCtx.beginPath();
-    for (let i = 0; i < envHistory.length; i++) {
-        const x = (i + 0.5) / envHistory.length * w;
+    const N = envHistory.length;
+    for (let i = 0; i < N; i++) {
+        const x = (i + 0.5) / N * w;
         const y = h - (envHistory[i] - lo) / (hi - lo) * h;
         if (i === 0) envCtx.moveTo(x, y);
         else envCtx.lineTo(x, y);
@@ -289,7 +291,13 @@ function renderEnvelope() {
     }
     envCtx.setLineDash([]);
 
-    $("env-info").textContent = `mean=${envMeanDb.toFixed(1)} dB`;
+    // 时间刻度 (横轴是 env_window_s 秒历史)
+    const dur_s = N / envRate;
+    envCtx.fillStyle = "#666";
+    envCtx.font = "10px monospace";
+    envCtx.fillText(`-${dur_s.toFixed(1)} s`, 4, h - 4);
+    envCtx.fillText("now", w - 28, h - 4);
+    envCtx.fillText(`mean=${envMeanDb.toFixed(1)} dB`, w / 2 - 30, 12);
 }
 
 // === Flashes ===
@@ -335,6 +343,7 @@ function renderLoop() {
         renderSpectrum(f.spectrum);
         // 包络
         envHistory = f.envelope;
+        if (f.envelope_rate_hz) envRate = f.envelope_rate_hz;
         envMeanDb = f.envelope_db_mean;
         renderEnvelope();
         // 状态
@@ -717,6 +726,7 @@ socket.on("state", (s) => {
     $("val-ifgr").textContent = s.ifgr;
     $("ctl-rfgr").value = s.rfgr;
     $("val-rfgr").textContent = s.rfgr;
+    $("ctl-env-window-s").value = s.env_window_s;
     $("ctl-window-ms").value = s.flash_window_ms;
     $("ctl-baseline-s").value = s.flash_baseline_s;
     $("ctl-thresh").value = s.flash_thresh_db;
@@ -748,6 +758,7 @@ function applyControls() {
         sample_rate: parseFloat($("ctl-sr").value),
         ifgr: parseInt($("ctl-ifgr").value),
         rfgr: parseInt($("ctl-rfgr").value),
+        env_window_s: parseFloat($("ctl-env-window-s").value),
         flash_window_ms: parseFloat($("ctl-window-ms").value),
         flash_baseline_s: parseFloat($("ctl-baseline-s").value),
         flash_thresh_db: parseFloat($("ctl-thresh").value),
@@ -828,6 +839,7 @@ fetch("/api/state").then(r => r.json()).then(s => {
     $("val-ifgr").textContent = s.ifgr;
     $("ctl-rfgr").value = s.rfgr;
     $("val-rfgr").textContent = s.rfgr;
+    $("ctl-env-window-s").value = s.env_window_s;
     $("ctl-window-ms").value = s.flash_window_ms;
     $("ctl-baseline-s").value = s.flash_baseline_s;
     $("ctl-thresh").value = s.flash_thresh_db;
