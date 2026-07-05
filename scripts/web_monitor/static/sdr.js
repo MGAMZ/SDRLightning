@@ -13,25 +13,26 @@ const socket = io();
 // === 状态 ===
 let centerFreq = 50e6;
 
-// === 频率解析 / 格式化（支持 K / M / G 后缀，单位必须大写） ===
-function parseFreq(s) {
-    if (s == null) return NaN;
-    s = String(s).trim().replace(/\s+/g, "");
-    const m = s.match(/^([0-9]*\.?[0-9]+)\s*([kKMG]?)$/);
-    if (!m) return NaN;
-    const num = parseFloat(m[1]);
-    if (!isFinite(num)) return NaN;
-    const mult = { "": 1, "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9 }[m[2]];
-    return num * mult;
+// === 频率输入：数字框 + Hz/kHz/MHz/GHz 切换按钮 ===
+let freqMult = 1e6;
+function setActiveFreqUnit(mult) {
+    freqMult = mult;
+    document.querySelectorAll("#freq-unit-bar button").forEach(btn => {
+        btn.classList.toggle("active", parseFloat(btn.dataset.mult) === mult);
+    });
 }
-function formatFreq(hz) {
-    if (!isFinite(hz) || hz < 0) return String(hz);
-    let val, unit;
-    if (hz >= 1e9)      { val = hz / 1e9; unit = "G"; }
-    else if (hz >= 1e6) { val = hz / 1e6; unit = "M"; }
-    else if (hz >= 1e3) { val = hz / 1e3; unit = "k"; }
-    else                { val = hz;       unit = ""; }
-    return val.toFixed(3).replace(/\.?0+$/, "") + unit;
+function setFreqDisplay(hz) {
+    let mult;
+    if (hz >= 1e9) mult = 1e9;
+    else if (hz >= 1e6) mult = 1e6;
+    else if (hz >= 1e3) mult = 1e3;
+    else mult = 1;
+    setActiveFreqUnit(mult);
+    $("ctl-freq").value = hz / mult;
+}
+function readFreqHz() {
+    const v = parseFloat($("ctl-freq").value);
+    return (isFinite(v) ? v : 0) * freqMult;
 }
 let sampleRate = 2000000;
 let fftSize = 1024;
@@ -603,7 +604,7 @@ socket.on("state", (s) => {
     centerFreq = s.center_freq;
     sampleRate = s.sample_rate;
     fftSize = s.fft_size;
-    $("ctl-freq").value = formatFreq(s.center_freq);
+    setFreqDisplay(s.center_freq);
     $("ctl-sr").value = s.sample_rate;
     $("ctl-ifgr").value = s.ifgr;
     $("val-ifgr").textContent = s.ifgr;
@@ -625,9 +626,9 @@ socket.on("sferic", (ev) => {
 // === UI 控制 ===
 function applyControls() {
     const msg = $("ctl-msg");
-    const freqHz = parseFreq($("ctl-freq").value);
+    const freqHz = readFreqHz();
     if (!isFinite(freqHz) || freqHz <= 0) {
-        msg.textContent = "✗ 频率格式无效 (示例: 50M, 24000, 24k)";
+        msg.textContent = "✗ 频率必须为正数";
         msg.className = "hint err";
         return;
     }
@@ -649,7 +650,7 @@ function applyControls() {
         if (j.ok) {
             centerFreq = payload.center_freq;
             sampleRate = payload.sample_rate;
-            msg.textContent = `✓ 已应用 → ${formatFreq(payload.center_freq)}`;
+            msg.textContent = `✓ 已应用 → ${payload.center_freq.toLocaleString()} Hz`;
             msg.className = "hint";
             $("sample-rate").textContent = `SR: ${(payload.sample_rate/1e6).toFixed(2)} MSPS`;
             // 状态变化可能导致布局抖动，强制重测尺寸
@@ -667,6 +668,14 @@ function applyControls() {
     });
 }
 
+document.querySelectorAll("#freq-unit-bar button").forEach(btn => {
+    btn.addEventListener("click", () => {
+        const hz = readFreqHz();
+        setActiveFreqUnit(parseFloat(btn.dataset.mult));
+        $("ctl-freq").value = hz / freqMult;
+    });
+});
+
 $("apply-btn").addEventListener("click", applyControls);
 $("ctl-ifgr").addEventListener("input", e => { $("val-ifgr").textContent = e.target.value; });
 $("ctl-rfgr").addEventListener("input", e => { $("val-rfgr").textContent = e.target.value; });
@@ -674,8 +683,7 @@ $("ctl-rfgr").addEventListener("input", e => { $("val-rfgr").textContent = e.tar
 document.querySelectorAll(".preset").forEach(b => {
     b.addEventListener("click", () => {
         // 只改中心频率，不动采样率（用户自行决定 SR）
-        const hz = parseFloat(b.dataset.freq);
-        $("ctl-freq").value = formatFreq(hz);
+        setFreqDisplay(parseFloat(b.dataset.freq));
         applyControls();
     });
 });
@@ -699,7 +707,7 @@ fetch("/api/state").then(r => r.json()).then(s => {
     centerFreq = s.center_freq;
     sampleRate = s.sample_rate;
     fftSize = s.fft_size;
-    $("ctl-freq").value = formatFreq(s.center_freq);
+    setFreqDisplay(s.center_freq);
     $("ctl-sr").value = s.sample_rate;
     $("ctl-ifgr").value = s.ifgr;
     $("val-ifgr").textContent = s.ifgr;
