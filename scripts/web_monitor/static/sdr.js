@@ -99,22 +99,28 @@ function resizeWfStorage(newW, newH) {
 const wfStorage = document.createElement("canvas");
 const wfStorageCtx = wfStorage.getContext("2d", { alpha: false, willReadFrequently: true });
 
-// colormap (彩虹 jet: 暗→蓝→青→绿→黄→红→白)
+// colormap (Google Turbo: 暗紫→蓝→青→绿→黄→橙→红, 五次多项式拟合
+// 每个 0-1 输入都唯一映射到一个 RGB 像素, 全 256 色阶平滑过渡)
 const COLORMAP = new Uint8Array(256 * 3);
 (function initColormap() {
-    // t in [0, 1]
-    function jet(t) {
-        if (t < 0.125) return [0, 0, Math.floor(0.5 + t * 4 * 200)];
-        if (t < 0.375) return [0, Math.floor((t - 0.125) * 4 * 255), 255];
-        if (t < 0.625) return [Math.floor((t - 0.375) * 4 * 255), 255, Math.floor((0.625 - t) * 4 * 255)];
-        if (t < 0.875) return [255, Math.floor((0.875 - t) * 4 * 255), 0];
-        return [Math.floor((1.125 - t) * 4 * 255), 0, 0];
+    // t in [0, 1] -> [r, g, b] in [0, 255]
+    function turbo(t) {
+        const c = Math.max(0, Math.min(1, t));
+        const c2 = c * c, c3 = c2 * c, c4 = c3 * c, c5 = c4 * c;
+        const r = (0.135721 + 4.61539260 * c - 42.66032258 * c2 + 132.13108234 * c3 - 152.94239396 * c4 + 59.28637943 * c5) * 255;
+        const g = (0.091402 + 2.19418839 * c +  4.84296658 * c2 -  14.18503333 * c3 +   4.27729857 * c4 +  2.82956604 * c5) * 255;
+        const b = (0.106673 +12.64194608 * c - 60.58204836 * c2 + 110.36276726 * c3 -  89.90310912 * c4 + 27.34824973 * c5) * 255;
+        return [
+            Math.max(0, Math.min(255, r | 0)),
+            Math.max(0, Math.min(255, g | 0)),
+            Math.max(0, Math.min(255, b | 0)),
+        ];
     }
     for (let i = 0; i < 256; i++) {
-        const [r, g, b] = jet(i / 255);
-        COLORMAP[i*3]   = r;
-        COLORMAP[i*3+1] = g;
-        COLORMAP[i*3+2] = b;
+        const [r, g, b] = turbo(i / 255);
+        COLORMAP[i * 3]     = r;
+        COLORMAP[i * 3 + 1] = g;
+        COLORMAP[i * 3 + 2] = b;
     }
 })();
 
@@ -149,7 +155,52 @@ function resizeAll() {
 window.addEventListener("resize", resizeAll);
 resizeAll();
 // 应用后重测尺寸 + 每 2 秒保险一次（防 Apply 后布局抖动没触发 window.resize）
-setInterval(() => { resizeAll(); }, 2000);
+setInterval(() => { resizeAll(); updateFreqAxis(); }, 2000);
+
+// === 瀑布横轴频率标 ===
+function fmtFreq(f) {
+    const a = Math.abs(f);
+    if (a >= 1e6) return `${(f / 1e6).toFixed(a >= 1e7 ? 2 : 3)} MHz`;
+    if (a >= 1e3) return `${(f / 1e3).toFixed(1)} kHz`;
+    return `${f.toFixed(0)} Hz`;
+}
+function pickTickStep(approxStep) {
+    // 1, 2, 5 × 10^n — 跟 tick 数量无关, 而是 nice 数
+    const exp = Math.floor(Math.log10(Math.max(approxStep, 1)));
+    const base = Math.pow(10, exp);
+    const r = approxStep / base;
+    const nice = r < 1.5 ? 1 : r < 3.5 ? 2 : r < 7.5 ? 5 : 10;
+    return nice * base;
+}
+function updateFreqAxis() {
+    const c = wfCanvas;
+    const W = c.clientWidth;
+    if (W < 50 || !sampleRate) return;
+    const spanHz = sampleRate;
+    const fLo = centerFreq - spanHz / 2;
+    const fHi = centerFreq + spanHz / 2;
+    const step = pickTickStep(spanHz / 6);   // 大致 6 个 tick
+    const first = Math.ceil(fLo / step) * step;
+    const ticks = [];
+    for (let f = first; f <= fHi + step * 0.001; f += step) {
+        const x = ((f - fLo) / spanHz) * W;
+        ticks.push({ x, f });
+    }
+    if (ticks.length === 0) return;
+    let centerIdx = 0, centerDiff = Infinity;
+    for (let i = 0; i < ticks.length; i++) {
+        const d = Math.abs(ticks[i].f - centerFreq);
+        if (d < centerDiff) { centerDiff = d; centerIdx = i; }
+    }
+    const lastIdx = ticks.length - 1;
+    const axisEl = $("wf-freq-axis");
+    if (axisEl) axisEl.innerHTML = ticks.map((t, i) => {
+        const cls = i === 0 || i === lastIdx ? "tick edge"
+                  : i === centerIdx ? "tick center"
+                  : "tick";
+        return `<span class="${cls}" style="left:${t.x.toFixed(1)}px">${fmtFreq(t.f)}</span>`;
+    }).join("");
+}
 
 // === 数据缓冲 ===
 let pendingFrame = null;
@@ -299,13 +350,13 @@ function renderEnvelope() {
     }
     envCtx.setLineDash([]);
 
-    // 时间刻度 (横轴是 env_window_s 秒历史)
+    // 标签 (横轴 Xs + 均值) 移到 card-header 的 #env-info, 图里只留画本身
     const dur_s = N / envRate;
-    envCtx.fillStyle = "#666";
-    envCtx.font = "10px monospace";
-    envCtx.fillText(`-${dur_s.toFixed(1)} s`, 4, h - 4);
-    envCtx.fillText("now", w - 28, h - 4);
-    envCtx.fillText(`mean=${envMeanDb.toFixed(1)} dB`, w / 2 - 30, 12);
+    const infoEl = $("env-info");
+    if (infoEl) {
+        infoEl.textContent =
+            `−${dur_s.toFixed(1)} s · mean=${envMeanDb.toFixed(1)} dB`;
+    }
 }
 
 // === Flashes ===
@@ -718,6 +769,7 @@ socket.on("state", (s) => {
     $("ctl-post-ms").value = s.flash_post_ms;
     $("ctl-cooldown-ms").value = s.flash_cooldown_ms;
     $("sample-rate").textContent = `SR: ${(s.sample_rate/1e6).toFixed(2)} MSPS`;
+    updateFreqAxis();
 });
 
 socket.on("frame", (f) => {
@@ -767,6 +819,7 @@ function applyControls() {
             requestAnimationFrame(() => {
                 resizeAll();
                 renderWaterfallClear();
+                updateFreqAxis();
             });
         } else {
             msg.textContent = "✗ " + (j.error || "失败");
@@ -831,4 +884,5 @@ fetch("/api/state").then(r => r.json()).then(s => {
     $("ctl-post-ms").value = s.flash_post_ms;
     $("ctl-cooldown-ms").value = s.flash_cooldown_ms;
     $("sample-rate").textContent = `SR: ${(s.sample_rate/1e6).toFixed(2)} MSPS`;
+    updateFreqAxis();
 });

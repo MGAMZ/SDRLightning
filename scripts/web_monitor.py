@@ -469,8 +469,8 @@ def _finalize_flash(post_capture: dict):
     if lo >= captured_total:
         peak_iq = np.zeros(0, dtype=np.complex64)
     elif lo < pre_iq.size:
-        pre_part_n = pre_iq.size - lo
-        pre_part = pre_iq[-pre_part_n:] if pre_part_n > 0 else np.zeros(0, dtype=np.complex64)
+        end_in_pre = min(hi, pre_iq.size)
+        pre_part = pre_iq[lo:end_in_pre] if end_in_pre > lo else np.zeros(0, dtype=np.complex64)
         post_part_n = max(0, hi - pre_iq.size)
         post_part = post_iq[:post_part_n] if post_part_n > 0 else np.zeros(0, dtype=np.complex64)
         peak_iq = np.concatenate([pre_part, post_part]) if pre_part.size + post_part.size > 0 \

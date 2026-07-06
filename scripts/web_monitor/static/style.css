@@ -207,6 +207,26 @@ button.preset:hover { background: #2a2e3a; color: #fff; }
 .card-header:hover h3 { color: #ccc; }
 .card-header h3 { font-size: 12px; color: #aaa; font-weight: 500; flex: 1; transition: color 0.15s; }
 .muted { color: #666; font-size: 11px; font-family: ui-monospace, monospace; }
+
+/* 瀑布横轴频率标: 用绝对定位的 span 落在 canvas 下方一行 */
+.freq-axis {
+    position: relative;
+    height: 18px;
+    margin-top: 2px;
+    font-family: ui-monospace, monospace;
+    font-size: 10px;
+    color: #888;
+    user-select: none;
+}
+.freq-axis .tick {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    pointer-events: none;
+}
+.freq-axis .edge { color: #aaa; }
+.freq-axis .center { color: #ffcc00; }
 canvas {
     display: block;
     width: 100% !important;
