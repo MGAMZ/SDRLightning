@@ -543,9 +543,8 @@ function drawFlashEnvelope(ev, env_rate) {
     flEnvCtx.font = "10px monospace";
     flEnvCtx.fillText("← pre-trigger  |trigger|  post-trigger →", 4, 12);
     flEnvCtx.fillText(`peak=${ev.peak_env.toFixed(3)} @ ${ev.peak_t_ms.toFixed(1)} ms`, 4, H - 4);
-    flEnvCtx.fillText(`+${(env_dur_s*1000).toFixed(0)} ms`, W - 50, H - 4);
-    const env_dur_s_val = trace.length / env_rate;
-    void env_dur_s_val;
+    const envDurS = trace.length / env_rate;
+    flEnvCtx.fillText(`+${(envDurS * 1000).toFixed(0)} ms`, W - 50, H - 4);
 }
 
 function drawFlashSpectrum(ev) {
