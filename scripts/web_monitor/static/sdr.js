@@ -363,9 +363,9 @@ function renderLoop() {
         $("flash-count").textContent = `Flashes: ${flashCount}`;
         if (f.peak_ema !== undefined) {
             const peakPct = (f.peak_ema * 100).toFixed(0);
-            const colorClass = f.peak_ema > 0.95 ? "peak-warn" : (f.peak_ema > 0.7 ? "peak-ok" : "peak-low");
+            const colorClass = f.overflow ? "peak-overload"
+                              : (f.peak_ema > 0.7 ? "peak-ok" : "peak-low");
             $("peak-info").innerHTML = `<span class="${colorClass}">Peak: ${peakPct}%</span>`;
-            checkOverflow(f.peak_ema, f);
         }
         const up = Math.floor(f.t);
         $("uptime").textContent = `Up: ${Math.floor(up/60)}m ${up%60}s`;
@@ -687,34 +687,6 @@ function initTooltips() {
     });
 }
 initTooltips();
-
-// === Overflow 警告 ===
-let overflowWarned = false;
-let overflowDismissed = false;
-const warnBanner = $("warn-banner");
-$("warn-dismiss").addEventListener("click", () => {
-    warnBanner.style.display = "none";
-    overflowDismissed = true;
-});
-function checkOverflow(peak, f) {
-    if (overflowDismissed) return;
-    if (peak > 0.95) {
-        if (!overflowWarned) {
-            warnBanner.style.display = "flex";
-            $("warn-text").textContent =
-                `⚠ ADC 过载：|IQ| 滑动平均峰值 = ${peak.toFixed(3)} (>0.95)。` +
-                `请降低增益 (RFGR↑ 或 IFGR↓) 以避免信号失真。`;
-            overflowWarned = true;
-        } else {
-            $("warn-text").textContent =
-                `⚠ ADC 过载持续：peak=${peak.toFixed(3)}。请降低增益。`;
-        }
-    } else if (peak < 0.7 && overflowWarned) {
-        // 信号降下来后自动隐藏
-        warnBanner.style.display = "none";
-        overflowWarned = false;
-    }
-}
 
 // === Socket 事件 ===
 socket.on("connect", () => {

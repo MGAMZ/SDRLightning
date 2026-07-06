@@ -29,35 +29,17 @@ header h1 { font-size: 18px; font-weight: 600; color: #e8e8e8; }
 
 .peak-low { color: #666; }
 .peak-ok  { color: #00cc66; }
-.peak-warn { color: #ff8844; font-weight: bold; }
-
-/* 警告 banner */
-.warn-banner {
-    background: linear-gradient(90deg, #5c2c1a, #7a3d24);
-    border-bottom: 1px solid #cc6633;
-    color: #ffcc88;
-    padding: 8px 20px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    font-size: 13px;
-    animation: warnPulse 2s ease-in-out infinite;
+.peak-overload {
+    color: #fff;
+    background: #cc2244;
+    padding: 1px 8px;
+    border-radius: 3px;
+    font-weight: bold;
+    animation: peakFlash 0.6s ease-in-out infinite;
 }
-@keyframes warnPulse {
-    0%, 100% { background: linear-gradient(90deg, #5c2c1a, #7a3d24); }
-    50% { background: linear-gradient(90deg, #6a3421, #88442a); }
-}
-.warn-banner #warn-icon { font-size: 16px; }
-.warn-banner #warn-text { flex: 1; }
-.warn-banner #warn-dismiss {
-    background: transparent;
-    color: #ffcc88;
-    border: none;
-    font-size: 18px;
-    cursor: pointer;
-    width: auto;
-    padding: 0 8px;
-    margin: 0;
+@keyframes peakFlash {
+    0%, 100% { background: #cc2244; }
+    50%      { background: #ff6688; }
 }
 
 .main {
