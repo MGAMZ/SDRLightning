@@ -27,7 +27,6 @@ header h1 { font-size: 18px; font-weight: 600; color: #e8e8e8; }
 .dot.ok { background: #00cc66; box-shadow: 0 0 6px #00cc66; }
 .dot.err { background: #cc3344; box-shadow: 0 0 6px #cc3344; }
 
-.peak-low { color: #666; }
 .peak-ok  { color: #00cc66; }
 .peak-overload {
     color: #fff;

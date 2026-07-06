@@ -363,8 +363,9 @@ function renderLoop() {
         $("flash-count").textContent = `Flashes: ${flashCount}`;
         if (f.peak_ema !== undefined) {
             const peakPct = (f.peak_ema * 100).toFixed(0);
-            const colorClass = f.overflow ? "peak-overload"
-                              : (f.peak_ema > 0.7 ? "peak-ok" : "peak-low");
+            // server 用 OVERFLOW_THRESHOLD=0.95 算 frame.overflow,
+            // 这边只看这一个布尔: >0.95 闪烁红, <=0.95 直接退绿色态
+            const colorClass = f.overflow ? "peak-overload" : "peak-ok";
             $("peak-info").innerHTML = `<span class="${colorClass}">Peak: ${peakPct}%</span>`;
         }
         const up = Math.floor(f.t);
